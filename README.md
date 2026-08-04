@@ -59,6 +59,7 @@ I’m not 100% sure how targets map to revisions, but so far I’ve found:
 - DualSense BDM-020 -> 0004
 - DualSense BDM-030 -> 0004
 - DualSense BDM-050 -> 000B
+- DualSense BDM-060 -> 000E
   (seems to depend on which SoC a revision uses)
 - DualSense Edge -> 0044
 
