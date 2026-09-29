@@ -83,6 +83,95 @@ pub struct Args {
     pub feedback: Option<crate::feedback::Preset>,
     #[arg(
         long,
+        requires = "feedback",
+        conflicts_with = "cycle",
+        help = "Lightbar color: name, #RRGGBB or R,G,B (0–255)."
+    )]
+    pub color: Option<crate::feedback::Rgb>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Lightbar brightness, 0–255 (default: 255)."
+    )]
+    pub brightness: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Cycle the lightbar smoothly through the rainbow."
+    )]
+    pub cycle: bool,
+    #[arg(
+        long,
+        value_enum,
+        requires = "feedback",
+        help = "Trigger side: left (L2), right (R2), or both (default)."
+    )]
+    pub trigger: Option<crate::feedback::TriggerSide>,
+    #[arg(
+        long,
+        value_enum,
+        requires = "feedback",
+        help = "Trigger effect (default: resistance)."
+    )]
+    pub effect: Option<crate::feedback::TriggerEffect>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Trigger start zone (default: 4); valid range depends on effect."
+    )]
+    pub start: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Weapon/bow/galloping/machine end zone, greater than start (default: 7)."
+    )]
+    pub end: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Trigger strength/amplitude, 1–8; machine uses 0–7 (default: 2)."
+    )]
+    pub strength: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Effect frequency setting, 1–255 (default: galloping 4; vibration/machine 25)."
+    )]
+    pub frequency: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Bow snap strength, 1–8 (default: 2)."
+    )]
+    pub snap_strength: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Galloping first foot, 0–6 (default: 1)."
+    )]
+    pub first_foot: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Galloping second foot, greater than first and at most 7 (default: 3)."
+    )]
+    pub second_foot: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Machine second strength, 0–7 (default: 4)."
+    )]
+    pub strength_b: Option<u8>,
+    #[arg(
+        long,
+        requires = "feedback",
+        help = "Machine strength-change period, 0–255 controller units (default: 20)."
+    )]
+    pub period: Option<u8>,
+    #[arg(long, requires = "feedback", conflicts_with_all = ["start", "strength"], value_name = "L0,L1,...,L9", help = "Resistance/vibration profile: ten comma-separated levels 0–8; 0 disables a zone.")]
+    pub zones: Option<crate::feedback::ZoneLevels>,
+    #[arg(
+        long,
         default_value_t = 10,
         help = "Capture duration (1–3600s) or feedback duration (1–30s).",
         requires = "timed_action"
@@ -156,5 +245,54 @@ mod tests {
         assert!(check.has_action());
         assert!(!check.update_latest);
         assert!(!check.yes);
+    }
+    #[test]
+    fn feedback_flags_require_an_action_and_reject_conflicts() {
+        for flags in [
+            vec!["--color", "red"],
+            vec!["--brightness", "128"],
+            vec!["--cycle"],
+            vec!["--trigger", "left"],
+            vec!["--effect", "bow"],
+            vec!["--start", "4"],
+            vec!["--end", "7"],
+            vec!["--strength", "2"],
+            vec!["--frequency", "25"],
+            vec!["--snap-strength", "2"],
+            vec!["--first-foot", "1"],
+            vec!["--second-foot", "3"],
+            vec!["--strength-b", "4"],
+            vec!["--period", "20"],
+            vec!["--zones", "0,0,0,0,2,2,2,2,2,2"],
+        ] {
+            let mut command = vec!["tool"];
+            command.extend(flags);
+            assert!(Args::try_parse_from(command).is_err());
+        }
+        for flags in [
+            vec!["--feedback", "lightbar", "--color", "red", "--cycle"],
+            vec![
+                "--feedback",
+                "triggers",
+                "--zones",
+                "0,0,0,0,2,2,2,2,2,2",
+                "--start",
+                "4",
+            ],
+            vec![
+                "--feedback",
+                "triggers",
+                "--zones",
+                "0,0,0,0,2,2,2,2,2,2",
+                "--strength",
+                "2",
+            ],
+            vec!["--feedback", "lightbar", "--brightness", "256"],
+            vec!["--feedback", "triggers", "--period", "256"],
+        ] {
+            let mut command = vec!["tool"];
+            command.extend(flags);
+            assert!(Args::try_parse_from(command).is_err());
+        }
     }
 }

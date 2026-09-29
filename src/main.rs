@@ -71,6 +71,11 @@ fn run(args: Args) -> Result<()> {
     if args.diagnostics {
         return diagnostics::run();
     }
+    // Validate feedback settings before opening hardware or sending any output.
+    let effect = args
+        .feedback
+        .map(|_| feedback::Effect::from_args(&args))
+        .transpose()?;
     if args.vid != 0x054c || ![0x0ce6, 0x0df2].contains(&args.pid) {
         return Err(AppError::Validation(
             "Only Sony DualSense and DualSense Edge VID/PIDs are supported".into(),
@@ -91,8 +96,8 @@ fn run(args: Args) -> Result<()> {
     if let Some(file) = args.record {
         return input::record(&dev, &file, args.duration, args.pid);
     }
-    if let Some(preset) = args.feedback {
-        return feedback::run(&dev, preset, args.duration);
+    if let Some(effect) = effect {
+        return feedback::run(&dev, effect, args.duration);
     }
     let info = dev.get_firmware_info()?;
     print_info(&info, &path, args.pid, args.json)?;

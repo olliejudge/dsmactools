@@ -29,7 +29,7 @@ The app finds the matching official Sony firmware, checks compatibility and batt
 | --- | --- |
 | Live input monitor | Sticks, buttons, triggers, touch and raw motion data |
 | Session recording | Raw and decoded USB inputs saved as JSONL, with timing and axis summaries |
-| Feedback lab | Timed rumble, lightbar and adaptive trigger tests |
+| Feedback lab | Every RGB lightbar color, rainbow cycling and seven adaptive trigger modes |
 | Developer diagnostics | Xcode, Swift, Metal and native macOS GameController capabilities |
 | Firmware | Check, download or install official updates |
 
@@ -45,7 +45,7 @@ dsmactools --print-firmware-info --json
 dsmactools --help
 ```
 
-Capture timing measures host report arrival, not game latency. [Capture format and measurement details](docs/captures.md).
+Capture timing measures host report arrival, not game latency. [Capture format](docs/captures.md) · [Lightbar and trigger testing](docs/feedback.md).
 
 ## Support
 

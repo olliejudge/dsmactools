@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Expand the lightbar lab with named colors, custom RGB/hex values, brightness and a smooth rainbow cycle.
+- Add configurable resistance, weapon, bow, galloping, machine and vibration effects, plus an off baseline, for L2, R2 or both.
+- Add per-zone resistance/vibration profiles and live trigger pull values during tests.
+- Keep every feedback test bounded to 1–30 seconds with cancellation and automatic reset.
+
 ## 0.3.1
 
 - Simplify the README for everyday firmware updates and developer testing.

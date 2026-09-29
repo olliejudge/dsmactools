@@ -82,3 +82,13 @@ On this Apple Silicon Mac, `brew install dsmactools` poured the published bottle
 Local Homebrew audit/test commands were blocked by the separately installed outdated Command Line Tools, despite current full Xcode. Those checks passed on the clean release runners; system developer tools were not modified.
 
 Independent security reviews covered tracked files and Git history, the tagged source archive, tap changes, and both actual bottle archives/binaries. No credentials, personal machine paths, device captures or firmware images were found in the published artifacts. Bottle build paths and receipts refer to generic hosted runners and Homebrew staging. The local working instructions and audit reports are excluded from Git.
+
+## Expanded feedback lab (0.4.0)
+
+The feedback lab covers full 24-bit RGB, sixteen named choices including off, brightness scaling and a twelve-second rainbow cycle. Adaptive triggers expose resistance, weapon, vibration, bow, galloping, machine and an off baseline, with independent L2/R2 selection and ten-zone resistance/vibration profiles. Report fields and parameter bounds were independently reviewed against [dualsensectl's primary implementation](https://github.com/nowrep/dualsensectl/blob/main/main.c). Protocol facts inform an independent Rust implementation; no unknown raw effect modes are exposed.
+
+All 24 Rust tests, formatting, Clippy with warnings denied and the locked release build passed. Tests include known report vectors, side flags, per-zone packing, mode-specific bounds, incompatible options, full RGB parsing and reset reports. Feedback settings and duration are validated before hardware opens.
+
+On the same USB-connected standard Type 000B controller at firmware 0630, short transfers completed for all seven modes, a custom zone profile, custom RGB/brightness, off and rainbow cycling, followed by successful reset transfers. The terminal menu accepted defaults, retried invalid custom color input, cancelled a text prompt with Esc and displayed live L2/R2 input percentages. A thirty-second off-baseline test was stopped early with q and reset successfully. No firmware flash was performed.
+
+These checks verify USB transfer and input/terminal behavior, not measured physical color, force or oscillation quality. Frequency, period, zone and strength values remain protocol settings. Edge hardware remains untested. [Feedback settings and examples](feedback.md).
