@@ -63,4 +63,18 @@ jobs:
           for file in ./dsmactools--*.bottle.tar.gz; do
             mv "$file" "${file/--/-}"
           done
-          gh release upload "v$RELEASE_VERSION" ./dsmactools-*.bottle.tar.gz ./dsmactools--*.bottle.json --repo "$GITHUB_REPOSITORY"
+          archives=(./dsmactools-*.bottle.tar.gz)
+          metadata=(./dsmactools--*.bottle.json)
+          archive_name="${archives[0]##*/}"
+          metadata_name="${metadata[0]##*/}"
+          gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > existing-assets.txt
+          archive_exists=$(ruby -e 'puts File.readlines(ARGV[0], chomp: true).include?(ARGV[1])' existing-assets.txt "$archive_name")
+          metadata_exists=$(ruby -e 'puts File.readlines(ARGV[0], chomp: true).include?(ARGV[1])' existing-assets.txt "$metadata_name")
+          if [ "$archive_exists" = true ] && [ "$metadata_exists" = true ]; then
+            echo "Retaining the previously published immutable bottle and metadata."
+          elif [ "$archive_exists" = true ] || [ "$metadata_exists" = true ]; then
+            echo "Incomplete existing bottle pair; review it before retrying."
+            exit 1
+          else
+            gh release upload "v$RELEASE_VERSION" "${archives[0]}" "${metadata[0]}" --repo "$GITHUB_REPOSITORY"
+          fi
