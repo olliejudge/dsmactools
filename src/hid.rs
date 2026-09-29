@@ -43,7 +43,7 @@ impl DualSenseHid {
         FirmwareInfo::parse(raw)
     }
 
-    pub fn preflight_battery(&self) -> Result<u8> {
+    pub fn battery(&self) -> Result<u8> {
         let mut raw = [0u8; 64];
         let size = self.dev.read_timeout(&mut raw, 2000)?;
         if size != 64 || raw[0] != 0x01 {
@@ -61,6 +61,11 @@ impl DualSenseHid {
                 ));
             }
         };
+        Ok(percent)
+    }
+
+    pub fn preflight_battery(&self) -> Result<u8> {
+        let percent = self.battery()?;
         if percent < 10 {
             return Err(AppError::Validation(
                 "Charge the controller to at least 10% before updating".into(),
@@ -139,6 +144,33 @@ impl DualSenseHid {
         self.dev.send_feature_report(data)?;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct Controller {
+    pub path: String,
+    pub pid: u16,
+    pub name: String,
+}
+
+pub fn controllers() -> Result<Vec<Controller>> {
+    let api = HidApi::new()?;
+    Ok(api
+        .device_list()
+        .filter(|d| {
+            d.vendor_id() == 0x054c
+                && [0x0ce6, 0x0df2].contains(&d.product_id())
+                && matches!(d.bus_type(), BusType::Usb)
+        })
+        .map(|d| Controller {
+            path: d.path().to_string_lossy().into_owned(),
+            pid: d.product_id(),
+            name: d
+                .product_string()
+                .unwrap_or("DualSense controller")
+                .to_owned(),
+        })
+        .collect())
 }
 
 pub fn print_devices(vid: u16, pid: u16) -> Result<()> {

@@ -3,6 +3,7 @@ mod error;
 mod firmware;
 mod hid;
 mod protocol;
+mod ui;
 mod update;
 
 use crate::{
@@ -12,6 +13,7 @@ use crate::{
     protocol::FirmwareInfo,
 };
 use clap::Parser;
+use std::io::IsTerminal;
 
 fn main() {
     let args = Args::parse();
@@ -23,7 +25,13 @@ fn main() {
         })
         .format_timestamp(None)
         .init();
-    if let Err(err) = run(args) {
+    let menu = args.interactive
+        || (std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && !args.has_action()
+            && !args.yes);
+    let result = if menu { ui::run(args) } else { run(args) };
+    if let Err(err) = result {
         eprintln!("{err}");
         std::process::exit(1);
     }
@@ -89,7 +97,8 @@ fn run(args: Args) -> Result<()> {
             );
             return Ok(());
         }
-        let (image, downloaded) = firmware::download(&target, latest, &info, args.pid)?;
+        let (image, downloaded) =
+            firmware::download(&target, latest, &info, args.pid, args.cache_dir.as_deref())?;
         println!("Downloaded: {}", downloaded.display());
         if args.download_latest {
             println!(
@@ -170,6 +179,9 @@ fn verify_installed(
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {
     use std::io::{self, Write};
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        return ui::confirm_update();
+    }
     print!("{prompt} [y/N] ");
     io::stdout().flush()?;
     let mut input = String::new();

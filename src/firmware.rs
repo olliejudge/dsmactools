@@ -137,10 +137,11 @@ pub fn download(
     version: u16,
     info: &FirmwareInfo,
     pid: u16,
+    cache_dir: Option<&Path>,
 ) -> Result<(FirmwareImage, PathBuf)> {
     let url = format!("{SONY_BASE}/fwupdate{target}/0x{version:04X}/FWUPDATE{target}.bin");
     let image = FirmwareImage::validate(fetch(&url)?, info, pid, Some(version))?;
-    let dir = PathBuf::from("firmware")
+    let dir = cache_directory(cache_dir)?
         .join(target)
         .join(format!("0x{version:04X}"));
     std::fs::create_dir_all(&dir)?;
@@ -156,6 +157,22 @@ pub fn download(
         serde_json::to_vec_pretty(&manifest).map_err(|e| invalid(e.to_string()))?,
     )?;
     Ok((image, path))
+}
+
+pub fn cache_directory(override_path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.to_path_buf());
+    }
+    let user_home = std::env::var_os("HOME")
+        .ok_or_else(|| invalid("Cannot locate user cache; provide --cache-dir"))?;
+    #[cfg(target_os = "macos")]
+    let cache = PathBuf::from(user_home).join("Library/Caches/ds-mac-tools/firmware");
+    #[cfg(not(target_os = "macos"))]
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(user_home).join(".cache"))
+        .join("ds-mac-tools/firmware");
+    Ok(cache)
 }
 
 #[cfg(test)]
@@ -223,5 +240,12 @@ mod tests {
         let mut next = image();
         next[0x78..0x7a].copy_from_slice(&0x0701u16.to_le_bytes());
         assert!(FirmwareImage::validate(next, &current, 0x0ce6, Some(0x0701)).is_ok());
+    }
+    #[test]
+    fn cache_override_is_independent_of_working_directory() {
+        assert_eq!(
+            cache_directory(Some(Path::new("/tmp/ds-test-cache"))).unwrap(),
+            PathBuf::from("/tmp/ds-test-cache")
+        );
     }
 }

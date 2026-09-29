@@ -47,3 +47,10 @@ Final local validation: ten regression tests passed, Rust formatting and Clippy 
 
 
 The final read from the finished build independently confirmed version `0x0630` and a new macOS HID path after re-enumeration. Its firmware report type had changed from `2` to `3`, while software series stayed `000B` and hardware info stayed `0x00001107`. The image header field at 0x60 (`2`) therefore must not be equated to the firmware report type. The final validator checks PID and software series, and a regression test covers this transition so later updates are not incorrectly blocked.
+
+
+## DS Mac Tools 0.3.0
+
+The executable was renamed to `ds-mac-tools` and given an interactive menu inspired by Mole. Read-only menu navigation was exercised in a real pseudo-terminal against the updated controller: automatic USB detection, 100% battery, live current-version status, Controller details, return to menu, and Escape to exit. JSON controller inspection remains available. No second hardware flash was needed for the terminal presentation changes. Twelve regression tests cover the shared update guards, CLI mode selection and cache override.
+
+Homebrew source installation is provided in the existing `olliejudge/homebrew-tap` as an independent formula, alongside the untouched Orion cask. Source installation avoids a requirement for distributing a signed/notarized executable. The release source archive is checksum-pinned and builds with Cargo's committed lockfile.

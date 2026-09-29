@@ -3,6 +3,8 @@ use crate::{
     hid::DualSenseHid,
     protocol::{UpdateCommand, UpdateStatus},
 };
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
 use std::{
     thread,
     time::{Duration, Instant},
@@ -41,18 +43,42 @@ impl<T: Transport> DualSenseUpdater<T> {
         self.dev.send(UpdateCommand::StartUpdate, &data[..256])?;
         self.wait(UpdateCommand::StartUpdate)?;
         println!("Header accepted.");
-        for (idx, block) in data.chunks(0x8000).enumerate() {
-            for packet in block.chunks(57) {
-                self.dev.send(UpdateCommand::WriteUpdateImage, packet)?;
-                self.wait(UpdateCommand::WriteUpdateImage)?;
-                thread::sleep(Duration::from_millis(10));
+        let progress = ProgressBar::new(data.len() as u64);
+        progress.set_style(
+            ProgressStyle::with_template(
+                "  {bar:32.cyan/blue} {percent:>3}%  {bytes}/{total_bytes}",
+            )
+            .unwrap()
+            .progress_chars("━╸─"),
+        );
+        let transfer = (|| -> Result<()> {
+            let mut sent = 0;
+            for (idx, block) in data.chunks(0x8000).enumerate() {
+                for packet in block.chunks(57) {
+                    self.dev.send(UpdateCommand::WriteUpdateImage, packet)?;
+                    self.wait(UpdateCommand::WriteUpdateImage)?;
+                    sent += packet.len();
+                    progress.set_position(sent as u64);
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if !std::io::stdout().is_terminal() {
+                    println!(
+                        "Writing: {}/{} blocks",
+                        idx + 1,
+                        data.len().div_ceil(0x8000)
+                    );
+                }
             }
-            println!(
-                "Writing: {}/{} blocks",
-                idx + 1,
-                data.len().div_ceil(0x8000)
+            Ok(())
+        })();
+        if let Err(error) = transfer {
+            progress.abandon_with_message(
+                "Transfer stopped. Read controller firmware before retrying.",
             );
+            return Err(error);
         }
+        progress.finish_and_clear();
+        println!("Transfer complete. Verifying image...");
         self.dev.send(UpdateCommand::VerifyUpdateImage, &[])?;
         self.wait(UpdateCommand::VerifyUpdateImage)?;
         println!("Image verification accepted.");

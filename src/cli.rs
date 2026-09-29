@@ -3,9 +3,9 @@ use clap::{ArgGroup, Parser};
 pub const DEFAULT_VID: u16 = 0x054c;
 pub const DEFAULT_PID: u16 = 0x0ce6;
 
-#[derive(Parser, Debug)]
-#[command(name = "dualsense-updater", version,
-    about = "Check and update DualSense firmware from Sony over USB.",
+#[derive(Parser, Debug, Clone)]
+#[command(name = "ds-mac-tools", version,
+    about = "DS Mac Tools: interactive DualSense firmware updates on macOS.",
     group(ArgGroup::new("action").args(["print_firmware_info", "check", "download_latest", "update_latest", "fw_image", "list"]).multiple(false)))]
 pub struct Args {
     #[arg(long, value_parser = parse_u16, default_value_t = DEFAULT_VID)]
@@ -21,7 +21,7 @@ pub struct Args {
     pub print_firmware_info: bool,
     #[arg(
         long,
-        help = "Compare the controller with Sony's live firmware catalogue (default)."
+        help = "Compare the controller with Sony's live firmware catalogue (read-only)."
     )]
     pub check: bool,
     #[arg(
@@ -59,6 +59,24 @@ pub struct Args {
     pub path: String,
     #[arg(short = 'v', long, help = "Enable protocol debugging.")]
     pub verbose: bool,
+    #[arg(long, help = "Open the interactive menu (the default in a terminal).", conflicts_with_all = ["print_firmware_info", "check", "download_latest", "update_latest", "fw_image", "list", "json", "yes"])]
+    pub interactive: bool,
+    #[arg(
+        long,
+        help = "Firmware download directory (default: the macOS user cache)."
+    )]
+    pub cache_dir: Option<std::path::PathBuf>,
+}
+
+impl Args {
+    pub fn has_action(&self) -> bool {
+        self.print_firmware_info
+            || self.check
+            || self.download_latest
+            || self.update_latest
+            || self.fw_image.is_some()
+            || self.list
+    }
 }
 
 fn parse_u16(value: &str) -> Result<u16, String> {
@@ -81,5 +99,17 @@ mod tests {
         assert!(Args::try_parse_from(["tool", "--json", "--update-latest"]).is_err());
         assert!(Args::try_parse_from(["tool", "--start-update-only"]).is_err());
         assert!(Args::try_parse_from(["tool", "--invalid"]).is_err());
+    }
+    #[test]
+    fn interactive_mode_cannot_bypass_update_confirmation() {
+        assert!(Args::try_parse_from(["tool", "--interactive", "--yes"]).is_err());
+        assert!(Args::try_parse_from(["tool", "--interactive", "--update-latest"]).is_err());
+        let default = Args::try_parse_from(["tool"]).unwrap();
+        assert!(!default.has_action());
+        assert!(!default.yes);
+        let check = Args::try_parse_from(["tool", "--check"]).unwrap();
+        assert!(check.has_action());
+        assert!(!check.update_latest);
+        assert!(!check.yes);
     }
 }
