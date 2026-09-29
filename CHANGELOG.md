@@ -6,6 +6,7 @@
 - Add configurable resistance, weapon, bow, galloping, machine and vibration effects, plus an off baseline, for L2, R2 or both.
 - Add per-zone resistance/vibration profiles and live trigger pull values during tests.
 - Keep every feedback test bounded to 1–30 seconds with cancellation and automatic reset.
+- State the privacy policy in the README and app: no telemetry or analytics; inputs, recordings and diagnostics stay local.
 
 ## 0.3.1
 

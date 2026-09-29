@@ -47,6 +47,10 @@ dsmactools --help
 
 Capture timing measures host report arrival, not game latency. [Capture format](docs/captures.md) · [Lightbar and trigger testing](docs/feedback.md).
 
+## Privacy
+
+**No telemetry or analytics.** Controller inputs, recordings and diagnostic output stay on your Mac and are never uploaded by the app. Its only network requests are firmware catalogue checks and downloads directly from Sony.
+
 ## Support
 
 Standard DualSense USB operation is hardware-tested, including a Type `000B` firmware update from `0580` to `0630`. Edge is detected but not hardware-tested. Direct input, feedback and firmware tools require USB; native macOS diagnostics can also see other supported controllers and Bluetooth devices.
