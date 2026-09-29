@@ -29,7 +29,7 @@ Official URL pattern: `https://fwupdater.dl.playstation.net/fwupdater/fwupdate<T
 
 The connected controller's report contained PID `0x0ce6`, software series `0x000b`, firmware type `2`, hardware info `0x00001107`, update version `0x0580` and build `Nov 1 2024 17:49:16`.
 
-The 000B/0x0630 image header independently contained PID `0x0ce6` at 0x62, type `2` at 0x60, series `0x000b` at 0x74 and version `0x0630` at 0x78. Its size was 950,272 bytes. The controller/image series agreement is the basis for selection; no retail-color or BDM guess is used. Firmware header interpretation remains reverse-engineered, with unsupported combinations refused.
+The 000B/0x0630 image header independently contained PID `0x0ce6` at 0x62, header value `2` at 0x60, series `0x000b` at 0x74 and version `0x0630` at 0x78. Its size was 950,272 bytes. The controller/image series agreement is the basis for selection; no retail-color or BDM guess is used. Firmware header interpretation remains reverse-engineered, with unsupported combinations refused.
 
 Upstream's date parser included the report ID in the date, exposed individual write phases, selected the first device without rejecting ambiguity, used unbounded polling, could accept StartUpdate retry as success, and reported no installed-version verification. This fork addresses those issues and adds live catalogue downloads, validation and regression tests.
 
@@ -43,4 +43,7 @@ SHA-256: `b66528795683d214ca06fe4672d298de75bf019bd5046442cbec63fc02974f86`, als
 
 This is one standard DualSense hardware test. Edge and other hardware revisions are not hardware-tested by this project. Protocol tests cannot substitute for hardware coverage.
 
-Final local validation: nine regression tests passed, Rust formatting and Clippy with warnings denied passed, the release build succeeded, and the live Sony catalogue watcher reported no changes against the saved baseline. GitHub CI has been configured but has not run remotely.
+Final local validation: ten regression tests passed, Rust formatting and Clippy with warnings denied passed, the release build succeeded, and the live Sony catalogue watcher reported no changes against the saved baseline. GitHub CI has been configured but has not run remotely.
+
+
+The final read from the finished build independently confirmed version `0x0630` and a new macOS HID path after re-enumeration. Its firmware report type had changed from `2` to `3`, while software series stayed `000B` and hardware info stayed `0x00001107`. The image header field at 0x60 (`2`) therefore must not be equated to the firmware report type. The final validator checks PID and software series, and a regression test covers this transition so later updates are not incorrectly blocked.

@@ -42,7 +42,7 @@ Use `--list` to enumerate HID paths and `--path PATH` when more than one control
 
 This is an unofficial updater using Sony's firmware. Sony's official PC application currently requires Windows. Keep the Mac awake, close games and other controller tools, and leave the cable connected throughout installation. The upstream author observed that the device can commit an update while writing, before verify/finalize commands are run.
 
-Before writing, the tool checks USB transport, unambiguous selection, battery state, a supported controller software series, the firmware header's PID/series/type, its version and the known 950,272-byte image format. Unknown targets and changed image formats stop for review. SHA-256 records the downloaded bytes; it is not an independent authenticity signature. The controller performs its own firmware authentication.
+Before writing, the tool checks USB transport, unambiguous selection, battery state, a supported controller software series, the firmware header's PID/series, its version and the known 950,272-byte image format. Unknown targets and changed image formats stop for review. SHA-256 records the downloaded bytes; it is not an independent authenticity signature. The controller performs its own firmware authentication.
 
 Packets use padded 64-byte HID reports and bounded status polling. Retry/busy states never count as success. The image is read once before transfer. Individual destructive debug phases from upstream have been removed. After transfer, the tool closes the old handle and waits up to 30 seconds for the controller to reappear with the expected firmware, software series and hardware information. Transfer completion alone is not reported as a verified update.
 

@@ -102,14 +102,12 @@ impl FirmwareImage {
         }
         let image_pid = u16::from_le_bytes(data[0x62..0x64].try_into().unwrap());
         let series = u32::from_le_bytes(data[0x74..0x78].try_into().unwrap());
-        let fw_type = u16::from_le_bytes(data[0x60..0x62].try_into().unwrap());
-        if image_pid != pid
-            || series != u32::from(info.software_series)
-            || fw_type != info.firmware_type
-        {
+        // The firmware report's type changes after upgrades (2 -> 3 on our
+        // tested controller). Header offset 0x60 is not that device identity.
+        if image_pid != pid || series != u32::from(info.software_series) {
             return Err(invalid(format!(
-                "Image/controller mismatch: PID {image_pid:04x}/{pid:04x}, series {series:04x}/{:04x}, type {fw_type}/{}",
-                info.software_series, info.firmware_type
+                "Image/controller mismatch: PID {image_pid:04x}/{pid:04x}, series {series:04x}/{:04x}",
+                info.software_series
             )));
         }
         let version = u16::from_le_bytes(data[0x78..0x7a].try_into().unwrap());
@@ -204,9 +202,9 @@ mod tests {
         }
     }
     #[test]
-    fn checks_size_pid_series_type_catalogue_and_upgrade() {
+    fn checks_size_pid_series_catalogue_and_upgrade() {
         assert!(FirmwareImage::validate(image(), &info(), 0x0ce6, Some(0x630)).is_ok());
-        for offset in [0, 0x60, 0x62, 0x74] {
+        for offset in [0, 0x62, 0x74] {
             let mut d = image();
             d[offset] ^= 1;
             assert!(FirmwareImage::validate(d, &info(), 0x0ce6, None).is_err());
@@ -216,5 +214,14 @@ mod tests {
         let mut i = info();
         i.firmware_version = 0x630;
         assert!(FirmwareImage::validate(image(), &i, 0x0ce6, None).is_err());
+    }
+    #[test]
+    fn firmware_type_can_change_across_an_upgrade() {
+        let mut current = info();
+        current.firmware_type = 3;
+        current.firmware_version = 0x0630;
+        let mut next = image();
+        next[0x78..0x7a].copy_from_slice(&0x0701u16.to_le_bytes());
+        assert!(FirmwareImage::validate(next, &current, 0x0ce6, Some(0x0701)).is_ok());
     }
 }
