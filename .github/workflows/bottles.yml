@@ -44,7 +44,7 @@ jobs:
           if [ "$(uname -m)" = x86_64 ]; then
             # Homebrew no longer publishes Intel Rust dependency bottles.
             # Use the pinned compiler above; this app has no runtime dependencies.
-            brew install --build-bottle --ignore-dependencies --env=std olliejudge/tap/dsmactools
+            brew install --build-bottle --ignore-dependencies olliejudge/tap/dsmactools
           else
             brew install --build-bottle olliejudge/tap/dsmactools
           fi
