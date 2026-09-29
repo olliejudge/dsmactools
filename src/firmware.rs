@@ -46,6 +46,8 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
     // curl uses macOS's certificate store; firmware never comes from mirrors.
     let output = Command::new("curl")
         .args([
+            // Must be first: ignore user curl config, including extra URLs/uploads.
+            "--disable",
             "--fail",
             "--silent",
             "--show-error",

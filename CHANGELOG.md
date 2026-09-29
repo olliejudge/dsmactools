@@ -7,6 +7,7 @@
 - Add per-zone resistance/vibration profiles and live trigger pull values during tests.
 - Keep every feedback test bounded to 1–30 seconds with cancellation and automatic reset.
 - State the privacy policy in the README and app: no telemetry or analytics; inputs, recordings and diagnostics stay local.
+- Ignore local curl configuration during firmware requests.
 
 ## 0.3.1
 
