@@ -479,7 +479,9 @@ pub fn run(mut args: Args) -> Result<()> {
                 term.write_line("  Firmware inspired by dualsense-updater-rs; terminal interaction inspired by Mole.")?;
                 term.write_line("  Independent software. Not endorsed by Sony or PlayStation.")?;
                 term.write_line("  No telemetry or analytics. Inputs, captures and diagnostics stay on your Mac.")?;
-                term.write_line("  Network access is only for Sony firmware checks and downloads.")?;
+                term.write_line(
+                    "  Network access is only for Sony firmware checks and downloads.",
+                )?;
                 term.write_line("  https://github.com/olliejudge/dsmactools")?;
                 pause(&term)?;
             }
