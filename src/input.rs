@@ -127,7 +127,10 @@ pub fn monitor(dev: &DualSenseHid) -> Result<()> {
             count += 1;
             if drawn.elapsed() >= Duration::from_millis(33) {
                 let text = format!(
-                    "DS MAC TOOLS · Live USB input\n\nLeft stick    X {:+.3}   Y {:+.3}\nRight stick   X {:+.3}   Y {:+.3}\nTriggers      L {:3}     R {:3}   (0–255)\nD-pad         {} (8 = neutral)\nButtons       {}\n\nGyroscope     {}   (raw counts)\nAccelerometer {}   (raw counts)\nTouch 1       {}\nTouch 2       {}\n\n{} reports · {:.1} reports/s (host arrival rate)\nq / Esc / Ctrl-C to return",
+                    "{}\n\nLeft stick    X {:+.3}   Y {:+.3}\nRight stick   X {:+.3}   Y {:+.3}\nTriggers      L {:3}     R {:3}   (0–255)\nD-pad         {} (8 = neutral)\nButtons       {}\n\nGyroscope     {}   (raw counts)\nAccelerometer {}   (raw counts)\nTouch 1       {}\nTouch 2       {}\n\n{} reports · {:.1} reports/s (host arrival rate)\nq / Esc / Ctrl-C to return",
+                    console::style("DS MAC TOOLS · Live USB input")
+                        .cyan()
+                        .bold(),
                     value["sticks"][0].as_f64().unwrap(),
                     value["sticks"][1].as_f64().unwrap(),
                     value["sticks"][2].as_f64().unwrap(),

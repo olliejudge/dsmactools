@@ -56,7 +56,7 @@ The executable was renamed to `ds-mac-tools` and given an interactive menu inspi
 Homebrew source installation is provided in the existing `olliejudge/homebrew-tap` as an independent formula, alongside the untouched Orion cask. Source installation avoids a requirement for distributing a signed/notarized executable. The release source archive is checksum-pinned and builds with Cargo's committed lockfile.
 
 
-The catalogue watcher is now implemented in Rust as `ds-mac-tools --check-catalogue`. It shares the application’s HTTPS/JSON path and compares all published keys with an embedded release baseline. This command does not enumerate or open HID devices, and returns a failure when versions, keys or metadata shape change. The earlier standalone Python helper was removed.
+The catalogue watcher is now implemented in Rust as `dsmactools --check-catalogue`. It shares the application’s HTTPS/JSON path and compares all published keys with an embedded release baseline. This command does not enumerate or open HID devices, and returns a failure when versions, keys or metadata shape change. The earlier standalone Python helper was removed.
 
 ## Developer workbench validation (2026-09-29)
 

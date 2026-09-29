@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Simplify the README for everyday firmware updates and developer testing.
+- Add color to the live input display.
+- Ignore local captures, diagnostics and environment files.
+- Add reproducible Homebrew bottle builds for Apple Silicon and Intel.
+
 ## 0.3.0
 
 - Rename the application to DS Mac Tools and the executable to `dsmactools`.

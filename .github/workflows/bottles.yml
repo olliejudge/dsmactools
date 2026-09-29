@@ -1,0 +1,56 @@
+name: Build Homebrew bottles
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version already published in the tap (without v)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  bottle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Validate stable version
+        shell: bash
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Build and test the published formula
+        shell: bash
+        run: |
+          brew update
+          brew tap olliejudge/tap
+          if brew help trust >/dev/null 2>&1; then
+            brew trust --formula olliejudge/tap/dsmactools
+          fi
+          formula_version=$(brew info --json=v2 olliejudge/tap/dsmactools | ruby -rjson -e 'puts JSON.parse(STDIN.read)["formulae"][0]["versions"]["stable"]')
+          test "$formula_version" = "$RELEASE_VERSION"
+          brew audit --strict --online olliejudge/tap/dsmactools
+          brew install --build-bottle olliejudge/tap/dsmactools
+          brew test olliejudge/tap/dsmactools
+          mkdir bottle-output
+          cd bottle-output
+          brew bottle --json --no-rebuild --root-url "https://github.com/olliejudge/dsmactools/releases/download/v$RELEASE_VERSION" olliejudge/tap/dsmactools
+      - name: Publish bottle and checksum metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        working-directory: bottle-output
+        run: |
+          gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null
+          # Homebrew's local filename uses --; its download URL uses -.
+          for file in ./dsmactools--*.bottle.tar.gz; do
+            mv "$file" "${file/--/-}"
+          done
+          gh release upload "v$RELEASE_VERSION" ./dsmactools-*.bottle.tar.gz ./dsmactools--*.bottle.json --repo "$GITHUB_REPOSITORY"
