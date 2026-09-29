@@ -1,88 +1,64 @@
-# DualSense Updater
+# dsmactools
 
-## Disclaimer
-
-This is not an official Sony application. If you can, use Sony’s official updater
-for Windows instead. If you don’t have convenient access to a Windows machine,
-you can try this tool.
-
-Use at your own risk. I got it working, but discovered the hard way that upgrades
-are auto-committed even if the verify and finalize steps are never run. That
-means I no longer have a controller to test changes on. There are no
-guarantees this won’t brick your controller, but I doubt it: the device appears
-to verify the image before committing. The worst case I would expect is a failed
-update that leaves the current firmware intact. This has only been tested on the
-standard DualSense, not the DualSense Edge.
+A maintained macOS-first fork of [nchie/dualsense-updater-rs](https://github.com/nchie/dualsense-updater-rs), based on `c1ef2ca`. Checks the connected controller against Sony's live firmware catalogue and downloads official firmware on demand.
 
 ## Build
 
-```sh
-cargo build --release
-```
-
-## Usage
-
-Build the binary and run it:
+Install Rust if needed (`brew install rust`), then:
 
 ```sh
-cargo build --release
-cd target/release/
+cargo build --release --locked
 ```
+
+macOS uses HIDAPI's native IOKit backend. No libusb driver replacement or root access is required. A sandboxed terminal/agent may require permission to access USB HID devices.
+
+## Use
+
+Connect a standard DualSense using a USB data cable.
 
 ```sh
-./dualsense-updater --print-firmware-info
+# Read-only controller information
+./target/release/dualsense-updater --print-firmware-info
+./target/release/dualsense-updater --print-firmware-info --json
+
+# Compare with Sony's current catalogue; also the default with no arguments
+./target/release/dualsense-updater --check
+
+# Download and validate without flashing
+./target/release/dualsense-updater --download-latest
+
+# Download, validate, ask for confirmation, install, and read back the version
+./target/release/dualsense-updater --update-latest
+
+# Explicitly confirm installation without a prompt
+./target/release/dualsense-updater --update-latest --yes
 ```
+
+Downloaded images and their source URL, byte count and SHA-256 manifest are kept under `firmware/`, excluded from Git. Each check fetches Sony's current catalogue; the version is not hard-coded. A local image can be supplied as a positional path and passes the same compatibility checks. Already installed versions and downgrades are refused before writing.
+
+Use `--list` to enumerate HID paths and `--path PATH` when more than one controller/interface is attached. The selected path must match the VID/PID and be USB. Edge enumeration is available with `--pid 0x0df2`; **Edge flashing has not been tested in this project**.
+
+## Update behavior
+
+This is an unofficial updater using Sony's firmware. Sony's official PC application currently requires Windows. Keep the Mac awake, close games and other controller tools, and leave the cable connected throughout installation. The upstream author observed that the device can commit an update while writing, before verify/finalize commands are run.
+
+Before writing, the tool checks USB transport, unambiguous selection, battery state, a supported controller software series, the firmware header's PID/series/type, its version and the known 950,272-byte image format. Unknown targets and changed image formats stop for review. SHA-256 records the downloaded bytes; it is not an independent authenticity signature. The controller performs its own firmware authentication.
+
+Packets use padded 64-byte HID reports and bounded status polling. Retry/busy states never count as success. The image is read once before transfer. Individual destructive debug phases from upstream have been removed. After transfer, the tool closes the old handle and waits up to 30 seconds for the controller to reappear with the expected firmware, software series and hardware information. Transfer completion alone is not reported as a verified update.
+
+If an update returns an error, reconnect and read `--print-firmware-info` before retrying. The controller may already have committed the image. The updater does not automatically retry the entire flash.
+
+## Maintenance
 
 ```sh
-./dualsense-updater FWUPDATE000B.bin
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked -- -D warnings
+python3 scripts/check_catalogue.py
 ```
 
-Note: you can replace `./dualsense-updater` with `cargo run -- ` and run it from the project directory if you prefer.
+The catalogue check compares Sony's latest versions with `catalogue-baseline.json` and fails when versions or target keys change, prompting review. GitHub Actions runs that check daily and tests on macOS and Linux. These workflows become active after publishing this repository to GitHub. They never flash hardware or silently accept new firmware formats. Review a new catalogue entry before updating the baseline and compatibility checks.
 
-## Options
+Research, upstream provenance, protocol references and hardware validation are in [docs/research.md](docs/research.md).
 
-- `--vid` / `--pid`: USB VID/PID (default `0x054c:0x0ce6`).
-- `--path`: exact HID device path from the device listing.
-- `FW_IMAGE`: firmware image path (required for update commands).
-- `--verbose` / `-v`: print extra update chunk/status debug output.
-
-## Usage Instructions
-
-The latest versions for each target are listed here:
-
-```
-https://fwupdater.dl.playstation.net/fwupdater/info.json
-```
-
-I’m not 100% sure how targets map to revisions, but so far I’ve found:
-
-- DualSense BDM-020 -> 0004
-- DualSense BDM-030 -> 0004
-- DualSense BDM-050 -> 000B
-- DualSense BDM-060 -> 000E
-  (seems to depend on which SoC a revision uses)
-- DualSense Edge -> 0044
-
-In my experience, attempting to flash the wrong firmware fails verification, so it should not brick anything.
-
-Firmware files can be downloaded from:
-
-```
-https://fwupdater.dl.playstation.net/fwupdater/fwupdate<target>/<version>/FWUPDATE<target>.bin
-```
-
-Example: to get version `0x0630` for DualSense BDM-050 (`000B`), use:
-
-```
-https://fwupdater.dl.playstation.net/fwupdater/fwupdate000B/0x0630/FWUPDATE000B.bin
-```
-
-## Notes
-
-- A controller already on the latest firmware may not return success codes past
-  `--start-update`; this is expected.
-- You may need OS-specific permissions to access HID devices.
-
-## License
-
-MIT. See `LICENSE`.
+MIT. The original upstream license is preserved in `LICENSE`. Sony firmware is downloaded separately and is not licensed by this repository.

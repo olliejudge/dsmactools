@@ -1,11 +1,11 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
-use hidapi::{HidApi, HidDevice};
+use hidapi::{BusType, HidApi, HidDevice};
 
 use crate::error::{AppError, Result};
 use crate::protocol::{
-    decode_ascii, FirmwareInfo, UpdateCommand, UpdateStatus, REPORT_ID_FIRMWARE_INFO,
-    REPORT_ID_UPDATE_COMMAND, REPORT_ID_UPDATE_STATUS,
+    FirmwareInfo, REPORT_ID_FIRMWARE_INFO, REPORT_ID_UPDATE_COMMAND, REPORT_ID_UPDATE_STATUS,
+    UpdateCommand, UpdateStatus,
 };
 
 pub struct DualSenseHid {
@@ -15,60 +15,58 @@ pub struct DualSenseHid {
 
 pub fn find_first_device_path(vid: u16, pid: u16) -> Result<String> {
     let api = HidApi::new()?;
-    let device = api
-        .device_list()
-        .find(|d| d.vendor_id() == vid && d.product_id() == pid)
+    let mut devices = api.device_list().filter(|d| {
+        d.vendor_id() == vid && d.product_id() == pid && matches!(d.bus_type(), BusType::Usb)
+    });
+    let device = devices
+        .next()
         .ok_or(AppError::DeviceNotFound { vid, pid })?;
+    if devices.next().is_some() {
+        return Err(AppError::Validation(
+            "Multiple USB interfaces/controllers found; select --path from --list".into(),
+        ));
+    }
     Ok(device.path().to_string_lossy().to_string())
 }
 
 impl DualSenseHid {
-    pub fn open(vid: u16, pid: u16, path: Option<&str>) -> Result<Self> {
+    pub fn open(vid: u16, pid: u16, path: &str) -> Result<Self> {
         let api = HidApi::new()?;
-        let dev = if let Some(path_str) = path {
-            if let Ok(path) = CString::new(path_str) {
-                api.open_path(&path)?
-            } else {
-                let device_path = find_path(&api, vid, pid, path_str)?;
-                api.open_path(device_path)?
-            }
-        } else {
-            list_devices(&api, vid, pid);
-            let mut iter = api
-                .device_list()
-                .filter(|d| d.vendor_id() == vid && d.product_id() == pid);
-            let device = iter
-                .next()
-                .ok_or(AppError::DeviceNotFound { vid, pid })?;
-            device.open_device(&api)?
-        };
+        let device_path = find_path(&api, vid, pid, path)?;
+        let dev = api.open_path(device_path)?;
         Ok(Self { _api: api, dev })
     }
 
     pub fn get_firmware_info(&self) -> Result<FirmwareInfo> {
         let raw = self.get_feature_report(REPORT_ID_FIRMWARE_INFO, 64)?;
-        if raw.len() < 20 {
-            return Err(AppError::FirmwareInfoTooShort(raw.len()));
+        log::debug!("Firmware report: {:02x?}", raw);
+        FirmwareInfo::parse(raw)
+    }
+
+    pub fn preflight_battery(&self) -> Result<u8> {
+        let mut raw = [0u8; 64];
+        let size = self.dev.read_timeout(&mut raw, 2000)?;
+        if size != 64 || raw[0] != 0x01 {
+            return Err(AppError::Validation(
+                "No valid USB input report; check cable and close other controller apps".into(),
+            ));
         }
-        let payload = if raw.len() > 64 && raw[0] == REPORT_ID_FIRMWARE_INFO {
-            &raw[1..]
-        } else {
-            raw.as_slice()
+        let status = raw[53];
+        let percent = match status >> 4 {
+            0 | 1 => ((status & 0x0f) * 10 + 5).min(100),
+            2 => 100,
+            _ => {
+                return Err(AppError::Validation(
+                    "Controller reports a battery/charging fault".into(),
+                ));
+            }
         };
-        if payload.len() < 47 {
-            return Err(AppError::FirmwareInfoPayloadTooShort(payload.len()));
+        if percent < 10 {
+            return Err(AppError::Validation(
+                "Charge the controller to at least 10% before updating".into(),
+            ));
         }
-        let build_date = decode_ascii(&payload[..12]);
-        let build_time = decode_ascii(&payload[12..20]);
-        let firmware_version = u16::from_le_bytes([payload[44], payload[45]]);
-        let unknown = payload[20..].to_vec();
-        Ok(FirmwareInfo {
-            build_date,
-            build_time,
-            firmware_version,
-            unknown,
-            raw,
-        })
+        Ok(percent)
     }
 
     pub fn send_update_command(&self, command: UpdateCommand, payload: &[u8]) -> Result<()> {
@@ -81,18 +79,25 @@ impl DualSenseHid {
         for off in offsets {
             let chunk = &payload[off..payload.len().min(off + max_chunk)];
             let data_len = chunk.len() as u8;
-            let data = [REPORT_ID_UPDATE_COMMAND, command as u8, data_len]
-                .into_iter()
-                .chain(chunk.iter().copied())
-                .collect::<Vec<u8>>();
+            let mut data = [0u8; 64];
+            data[..3].copy_from_slice(&[REPORT_ID_UPDATE_COMMAND, command as u8, data_len]);
+            data[3..3 + chunk.len()].copy_from_slice(chunk);
             let preview = chunk
                 .iter()
                 .take(4)
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
                 .join(" ");
-            log::debug!("F4 chunk off={} len={} first4={}", off, chunk.len(), preview);
+            log::debug!(
+                "F4 chunk off={} len={} first4={}",
+                off,
+                chunk.len(),
+                preview
+            );
             self.send_feature_report_raw(&data)?;
+            if command == UpdateCommand::StartUpdate && off == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
         Ok(())
     }
@@ -136,38 +141,30 @@ impl DualSenseHid {
     }
 }
 
-fn list_devices(api: &HidApi, vid: u16, pid: u16) {
-    let mut found = false;
-    for (idx, device) in api
+pub fn print_devices(vid: u16, pid: u16) -> Result<()> {
+    let api = HidApi::new()?;
+    for d in api
         .device_list()
         .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
-        .enumerate()
     {
-        found = true;
-        let path = device.path();
-        let usage_page = device.usage_page();
-        let usage = device.usage();
-        let iface = device.interface_number();
-        let product = device.product_string().unwrap_or("");
-        let serial = device.serial_number().unwrap_or("");
-        log::debug!(
-            "[{}] path={:?} iface={} usage_page=0x{:04x} usage=0x{:04x} product={:?} serial={:?}",
-            idx, path, iface, usage_page, usage, product, serial
+        println!(
+            "{} {:04x}:{:04x} {:?} usage={:04x}:{:04x} {}",
+            d.path().to_string_lossy(),
+            d.vendor_id(),
+            d.product_id(),
+            d.bus_type(),
+            d.usage_page(),
+            d.usage(),
+            d.product_string().unwrap_or("")
         );
     }
-    if !found {
-        log::debug!(
-            "No HID devices found for VID:PID {:04x}:{:04x}",
-            vid,
-            pid
-        );
-    }
+    Ok(())
 }
 
 fn find_path<'a>(api: &'a HidApi, vid: u16, pid: u16, path_str: &str) -> Result<&'a CStr> {
-    let mut matches = api
-        .device_list()
-        .filter(|d| d.vendor_id() == vid && d.product_id() == pid);
+    let mut matches = api.device_list().filter(|d| {
+        d.vendor_id() == vid && d.product_id() == pid && matches!(d.bus_type(), BusType::Usb)
+    });
     for device in matches.by_ref() {
         let path = device.path();
         if path.to_string_lossy() == path_str {

@@ -1,225 +1,164 @@
-use std::path::Path;
-use std::thread;
-use std::time::Duration;
-
-use crate::error::{
-    AppError, Result, StartUpdateError, UpdateFailure, VerifyUpdateImageError,
-    WriteUpdateImageError,
+use crate::{
+    error::{AppError, Result},
+    hid::DualSenseHid,
+    protocol::{UpdateCommand, UpdateStatus},
 };
-use crate::hid::DualSenseHid;
-use crate::protocol::{
-    FirmwareInfo, StartUpdateStatusCode, UpdateCommand, VerifyUpdateStatusCode,
-    WriteUpdateStatusCode,
+use std::{
+    thread,
+    time::{Duration, Instant},
 };
 
-pub struct DualSenseUpdater {
-    dev: DualSenseHid,
+pub trait Transport {
+    fn send(&self, command: UpdateCommand, data: &[u8]) -> Result<()>;
+    fn status(&self) -> Result<UpdateStatus>;
+}
+impl Transport for DualSenseHid {
+    fn send(&self, command: UpdateCommand, data: &[u8]) -> Result<()> {
+        self.send_update_command(command, data)
+    }
+    fn status(&self) -> Result<UpdateStatus> {
+        self.get_update_status(4)
+    }
 }
 
-impl DualSenseUpdater {
-    pub fn firmware_version_from_image(fw_image_path: &Path) -> Result<u16> {
-        let data = std::fs::read(fw_image_path)?;
-        let offset = 0x78usize;
-        if data.len() < offset + 2 {
-            return Err(AppError::FirmwareImageTooSmall);
+pub struct DualSenseUpdater<T: Transport> {
+    dev: T,
+    timeout: Duration,
+}
+impl<T: Transport> DualSenseUpdater<T> {
+    pub fn new(dev: T) -> Self {
+        Self {
+            dev,
+            timeout: Duration::from_secs(30),
         }
-        Ok(u16::from_le_bytes([data[offset], data[offset + 1]]))
     }
-
-    pub fn new(dev: DualSenseHid) -> Self {
-        Self { dev }
-    }
-
-    pub fn read_firmware_info(&self) -> Result<FirmwareInfo> {
-        self.dev.get_firmware_info()
-    }
-
-    pub fn start_update(&self, fw_image_path: &Path) -> Result<()> {
-        let data = std::fs::read(fw_image_path)?;
-        if data.len() < 256 {
-            return Err(AppError::FirmwareImageTooSmallForHeader);
+    pub fn flash(&self, data: &[u8]) -> Result<()> {
+        if data.len() != crate::firmware::FIRMWARE_SIZE {
+            return Err(AppError::Validation(
+                "Invalid image size before StartUpdate".into(),
+            ));
         }
-        let status = self.send_start_update_and_wait(&data[..256])?;
-        let failure = match status {
-            StartUpdateStatusCode::Success => None,
-            StartUpdateStatusCode::Processing | StartUpdateStatusCode::Retry => None,
-            StartUpdateStatusCode::HeaderCmacCheckError => Some(StartUpdateError::HeaderCmacCheckError),
-            StartUpdateStatusCode::HeaderVersionCheckError => {
-                Some(StartUpdateError::HeaderVersionCheckError)
+        self.dev.send(UpdateCommand::StartUpdate, &data[..256])?;
+        self.wait(UpdateCommand::StartUpdate)?;
+        println!("Header accepted.");
+        for (idx, block) in data.chunks(0x8000).enumerate() {
+            for packet in block.chunks(57) {
+                self.dev.send(UpdateCommand::WriteUpdateImage, packet)?;
+                self.wait(UpdateCommand::WriteUpdateImage)?;
+                thread::sleep(Duration::from_millis(10));
             }
-            StartUpdateStatusCode::HeaderCapabilityInfoError => {
-                Some(StartUpdateError::HeaderCapabilityInfoError)
-            }
-            StartUpdateStatusCode::HeaderFlashEraseError => {
-                Some(StartUpdateError::HeaderFlashEraseError)
-            }
-            StartUpdateStatusCode::HeaderInfoNotReceived => {
-                Some(StartUpdateError::HeaderInfoNotReceived)
-            }
-            StartUpdateStatusCode::HeaderCommonParamError => {
-                Some(StartUpdateError::HeaderCommonParamError)
-            }
-            StartUpdateStatusCode::HeaderOtherError => Some(StartUpdateError::HeaderOtherError),
-        };
-        if let Some(err) = failure {
-            return Err(AppError::UpdateFailed(UpdateFailure::StartUpdate(err)));
-        }
-        Ok(())
-    }
-
-    pub fn write_update_image(&self, fw_image_path: &Path) -> Result<()> {
-        let image = std::fs::read(fw_image_path)?;
-        let chunk_size = 0x8000usize;
-        for (idx, chunk) in image.chunks(chunk_size).enumerate() {
-            let status = self.send_write_update_image_and_wait(chunk)?;
             println!(
-                "WriteUpdateImage chunk {}: {} (0x{:02x})",
-                idx,
-                status.name(),
-                status as u8
+                "Writing: {}/{} blocks",
+                idx + 1,
+                data.len().div_ceil(0x8000)
             );
-            let failure = match status {
-                WriteUpdateStatusCode::Success | WriteUpdateStatusCode::SendNext => None,
-                WriteUpdateStatusCode::Retry | WriteUpdateStatusCode::AlsoRetry => None,
-                WriteUpdateStatusCode::WriteImageFlashWriteError => {
-                    Some(WriteUpdateImageError::WriteImageFlashWriteError)
-                }
-                WriteUpdateStatusCode::WriteUpdateNotStarted => {
-                    Some(WriteUpdateImageError::WriteUpdateNotStarted)
-                }
-                WriteUpdateStatusCode::WriteImageCommonParamError => {
-                    Some(WriteUpdateImageError::WriteImageCommonParamError)
-                }
-                WriteUpdateStatusCode::WriteImageOtherError => {
-                    Some(WriteUpdateImageError::WriteImageOtherError)
-                }
-            };
-            if let Some(err) = failure {
-                return Err(AppError::UpdateFailed(UpdateFailure::WriteUpdateImage(err)));
-            }
         }
+        self.dev.send(UpdateCommand::VerifyUpdateImage, &[])?;
+        self.wait(UpdateCommand::VerifyUpdateImage)?;
+        println!("Image verification accepted.");
+        self.dev.send(UpdateCommand::FinalizeUpdate, &[])?;
+        println!("Finalization sent; checking installed firmware.");
         Ok(())
     }
 
-    pub fn verify_update_image(&self) -> Result<()> {
-        let status = self.send_verify_update_image_and_wait()?;
-        let failure = match status {
-            VerifyUpdateStatusCode::Success => None,
-            VerifyUpdateStatusCode::KeepPolling => None,
-            VerifyUpdateStatusCode::VerifyHeaderCmacCheckError => {
-                Some(VerifyUpdateImageError::VerifyHeaderCmacCheckError)
-            }
-            VerifyUpdateStatusCode::VerifyHeaderVersionCheckError => {
-                Some(VerifyUpdateImageError::VerifyHeaderVersionCheckError)
-            }
-            VerifyUpdateStatusCode::VerifyCapabilityInfoError => {
-                Some(VerifyUpdateImageError::VerifyCapabilityInfoError)
-            }
-            VerifyUpdateStatusCode::VerifyFwBodyCmacCheckError => {
-                Some(VerifyUpdateImageError::VerifyFwBodyCmacCheckError)
-            }
-            VerifyUpdateStatusCode::VerifyCommonParamError => {
-                Some(VerifyUpdateImageError::VerifyCommonParamError)
-            }
-            VerifyUpdateStatusCode::VerifyOtherError => Some(VerifyUpdateImageError::VerifyOtherError),
-        };
-        if let Some(err) = failure {
-            return Err(AppError::UpdateFailed(UpdateFailure::VerifyUpdateImage(err)));
-        }
-        Ok(())
-    }
-
-    pub fn finalize_update(&self) -> Result<()> {
-        self.send_finalize_update()
-    }
-
-    fn send_start_update_and_wait(&self, data: &[u8]) -> Result<StartUpdateStatusCode> {
-        if data.len() != 256 {
-            return Err(AppError::InvalidUpdateStreamLength(data.len()));
-        }
-        self.dev
-            .send_update_command(UpdateCommand::StartUpdate, data)?;
+    fn wait(&self, command: UpdateCommand) -> Result<()> {
+        let deadline = Instant::now() + self.timeout;
         loop {
-            let status = self.dev.get_update_status(4)?;
-            if status.command != UpdateCommand::StartUpdate {
+            let status = self.dev.status()?;
+            if status.command != command {
                 return Err(AppError::UnexpectedUpdateStatusCommand(
                     status.command,
-                    UpdateCommand::StartUpdate,
+                    command,
                 ));
             }
-            if status.status_raw != StartUpdateStatusCode::Processing as u8 {
-                return Ok(StartUpdateStatusCode::from_int(status.status_raw));
+            match (command, status.status_raw) {
+                (_, 0x00) | (UpdateCommand::WriteUpdateImage, 0x03) => return Ok(()),
+                (UpdateCommand::StartUpdate, 0x04 | 0x10)
+                | (UpdateCommand::WriteUpdateImage, 0x01 | 0x10)
+                | (UpdateCommand::VerifyUpdateImage, 0x10) => {}
+                _ => {
+                    return Err(AppError::Validation(format!(
+                        "Controller rejected {command:?} with status 0x{:02X}",
+                        status.status_raw
+                    )));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(AppError::UpdateTimeout(command));
             }
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
 
-    fn send_write_update_image_and_wait(
-        &self,
-        data: &[u8],
-    ) -> Result<WriteUpdateStatusCode> {
-        if data.len() > 0x8000 {
-            return Err(AppError::UpdateImageTooLarge(data.len()));
-        }
-        let max_chunk = 0x39usize;
-        let offsets: Vec<usize> = if data.is_empty() {
-            vec![0]
-        } else {
-            (0..data.len()).step_by(max_chunk).collect()
-        };
-        for off in offsets {
-            let chunk = &data[off..data.len().min(off + max_chunk)];
-            self.dev
-                .send_update_command(UpdateCommand::WriteUpdateImage, chunk)?;
-            loop {
-                let status = self.dev.get_update_status(4)?;
-                if status.command != UpdateCommand::WriteUpdateImage {
-                return Err(AppError::UnexpectedUpdateStatusCommand(
-                    status.command,
-                    UpdateCommand::WriteUpdateImage,
-                ));
-            }
-                let status_code = WriteUpdateStatusCode::from_int(status.status_raw);
-                if status_code == WriteUpdateStatusCode::Retry
-                    || status_code == WriteUpdateStatusCode::AlsoRetry
-                {
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                if status_code == WriteUpdateStatusCode::SendNext
-                    || status_code == WriteUpdateStatusCode::Success
-                {
-                    break;
-                }
-                return Ok(status_code);
-            }
-        }
-        Ok(WriteUpdateStatusCode::Success)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    struct Fake {
+        command: UpdateCommand,
+        status: u8,
+        writes: Cell<usize>,
     }
-
-    fn send_verify_update_image_and_wait(&self) -> Result<VerifyUpdateStatusCode> {
-        self.dev
-            .send_update_command(UpdateCommand::VerifyUpdateImage, &[])?;
-        loop {
-            let status = self.dev.get_update_status(4)?;
-            if status.command != UpdateCommand::VerifyUpdateImage {
-                return Err(AppError::UnexpectedUpdateStatusCommand(
-                    status.command,
-                    UpdateCommand::VerifyUpdateImage,
-                ));
-            }
-            let status_code = VerifyUpdateStatusCode::from_int(status.status_raw);
-            if status_code == VerifyUpdateStatusCode::KeepPolling {
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            return Ok(status_code);
+    impl Transport for Fake {
+        fn send(&self, _: UpdateCommand, _: &[u8]) -> Result<()> {
+            self.writes.set(self.writes.get() + 1);
+            Ok(())
+        }
+        fn status(&self) -> Result<UpdateStatus> {
+            Ok(UpdateStatus {
+                report_id: 0xf5,
+                command: self.command,
+                status_raw: self.status,
+                raw: vec![],
+            })
         }
     }
-
-    fn send_finalize_update(&self) -> Result<()> {
-        self.dev
-            .send_update_command(UpdateCommand::FinalizeUpdate, &[])?;
-        Ok(())
+    fn fake(command: UpdateCommand, status: u8) -> DualSenseUpdater<Fake> {
+        let mut u = DualSenseUpdater::new(Fake {
+            command,
+            status,
+            writes: Cell::new(0),
+        });
+        u.timeout = Duration::ZERO;
+        u
+    }
+    #[test]
+    fn retry_is_never_success_and_cannot_hang() {
+        for (c, s) in [
+            (UpdateCommand::StartUpdate, 0x10),
+            (UpdateCommand::StartUpdate, 0x04),
+            (UpdateCommand::WriteUpdateImage, 1),
+            (UpdateCommand::VerifyUpdateImage, 0x10),
+        ] {
+            assert!(matches!(
+                fake(c, s).wait(c),
+                Err(AppError::UpdateTimeout(_))
+            ));
+        }
+    }
+    #[test]
+    fn errors_and_wrong_phases_fail() {
+        assert!(
+            fake(UpdateCommand::StartUpdate, 1)
+                .wait(UpdateCommand::StartUpdate)
+                .is_err()
+        );
+        assert!(
+            fake(UpdateCommand::StartUpdate, 0)
+                .wait(UpdateCommand::WriteUpdateImage)
+                .is_err()
+        );
+        assert!(
+            fake(UpdateCommand::WriteUpdateImage, 3)
+                .wait(UpdateCommand::WriteUpdateImage)
+                .is_ok()
+        );
+    }
+    #[test]
+    fn invalid_image_never_sends_start() {
+        let u = fake(UpdateCommand::StartUpdate, 0);
+        assert!(u.flash(&[0; 256]).is_err());
+        assert_eq!(u.dev.writes.get(), 0);
     }
 }

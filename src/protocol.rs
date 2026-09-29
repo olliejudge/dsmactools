@@ -7,10 +7,33 @@ pub struct FirmwareInfo {
     pub build_date: String,
     pub build_time: String,
     pub firmware_version: u16,
+    pub firmware_type: u16,
+    pub software_series: u16,
+    pub hardware_info: u32,
+    pub image_type: u8,
     #[allow(dead_code)]
     pub unknown: Vec<u8>,
     #[allow(dead_code)]
     pub raw: Vec<u8>,
+}
+
+impl FirmwareInfo {
+    pub fn parse(raw: Vec<u8>) -> crate::error::Result<Self> {
+        if raw.len() != 64 || raw[0] != REPORT_ID_FIRMWARE_INFO {
+            return Err(crate::error::AppError::FirmwareInfoTooShort(raw.len()));
+        }
+        Ok(Self {
+            build_date: decode_ascii(&raw[1..12]),
+            build_time: decode_ascii(&raw[12..20]),
+            firmware_type: u16::from_le_bytes(raw[20..22].try_into().unwrap()),
+            software_series: u16::from_le_bytes(raw[22..24].try_into().unwrap()),
+            hardware_info: u32::from_le_bytes(raw[24..28].try_into().unwrap()),
+            firmware_version: u16::from_le_bytes(raw[44..46].try_into().unwrap()),
+            image_type: raw[46],
+            unknown: raw[20..].to_vec(),
+            raw,
+        })
+    }
 }
 
 pub fn decode_ascii(data: &[u8]) -> String {
@@ -43,134 +66,6 @@ impl UpdateCommand {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum StartUpdateStatusCode {
-    Success = 0x00,
-    HeaderCmacCheckError = 0x01,
-    HeaderVersionCheckError = 0x02,
-    HeaderCapabilityInfoError = 0x03,
-    Processing = 0x04,
-    HeaderFlashEraseError = 0x05,
-    HeaderInfoNotReceived = 0x06,
-    Retry = 0x10,
-    HeaderCommonParamError = 0x11,
-    HeaderOtherError = 0xFF,
-}
-
-impl StartUpdateStatusCode {
-    pub fn from_int(value: u8) -> Self {
-        match value {
-            0x00 => Self::Success,
-            0x01 => Self::HeaderCmacCheckError,
-            0x02 => Self::HeaderVersionCheckError,
-            0x03 => Self::HeaderCapabilityInfoError,
-            0x04 => Self::Processing,
-            0x05 => Self::HeaderFlashEraseError,
-            0x06 => Self::HeaderInfoNotReceived,
-            0x10 => Self::Retry,
-            0x11 => Self::HeaderCommonParamError,
-            _ => Self::HeaderOtherError,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Success => "SUCCESS",
-            Self::HeaderCmacCheckError => "HEADER_CMAC_CHECK_ERROR",
-            Self::HeaderVersionCheckError => "HEADER_VERSION_CHECK_ERROR",
-            Self::HeaderCapabilityInfoError => "HEADER_CAPABILITY_INFO_ERROR",
-            Self::Processing => "PROCESSING",
-            Self::HeaderFlashEraseError => "HEADER_FLASH_ERASE_ERROR",
-            Self::HeaderInfoNotReceived => "HEADER_INFO_NOT_RECEIVED",
-            Self::Retry => "RETRY",
-            Self::HeaderCommonParamError => "HEADER_COMMON_PARAM_ERROR",
-            Self::HeaderOtherError => "HEADER_OTHER_ERROR",
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum WriteUpdateStatusCode {
-    Success = 0x00,
-    Retry = 0x01,
-    WriteImageFlashWriteError = 0x02,
-    SendNext = 0x03,
-    WriteUpdateNotStarted = 0x04,
-    AlsoRetry = 0x10,
-    WriteImageCommonParamError = 0x11,
-    WriteImageOtherError = 0xFF,
-}
-
-impl WriteUpdateStatusCode {
-    pub fn from_int(value: u8) -> Self {
-        match value {
-            0x00 => Self::Success,
-            0x01 => Self::Retry,
-            0x02 => Self::WriteImageFlashWriteError,
-            0x03 => Self::SendNext,
-            0x04 => Self::WriteUpdateNotStarted,
-            0x10 => Self::AlsoRetry,
-            0x11 => Self::WriteImageCommonParamError,
-            _ => Self::WriteImageOtherError,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Success => "SUCCESS",
-            Self::Retry => "RETRY",
-            Self::WriteImageFlashWriteError => "WRITE_IMAGE_FLASH_WRITE_ERROR",
-            Self::SendNext => "SEND_NEXT",
-            Self::WriteUpdateNotStarted => "WRITE_UPDATE_NOT_STARTED",
-            Self::AlsoRetry => "ALSO_RETRY",
-            Self::WriteImageCommonParamError => "WRITE_IMAGE_COMMON_PARAM_ERROR",
-            Self::WriteImageOtherError => "WRITE_IMAGE_OTHER_ERROR",
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum VerifyUpdateStatusCode {
-    Success = 0x00,
-    KeepPolling = 0x10,
-    VerifyHeaderCmacCheckError = 0x01,
-    VerifyHeaderVersionCheckError = 0x02,
-    VerifyCapabilityInfoError = 0x03,
-    VerifyFwBodyCmacCheckError = 0x04,
-    VerifyCommonParamError = 0x11,
-    VerifyOtherError = 0xFF,
-}
-
-impl VerifyUpdateStatusCode {
-    pub fn from_int(value: u8) -> Self {
-        match value {
-            0x00 => Self::Success,
-            0x10 => Self::KeepPolling,
-            0x01 => Self::VerifyHeaderCmacCheckError,
-            0x02 => Self::VerifyHeaderVersionCheckError,
-            0x03 => Self::VerifyCapabilityInfoError,
-            0x04 => Self::VerifyFwBodyCmacCheckError,
-            0x11 => Self::VerifyCommonParamError,
-            _ => Self::VerifyOtherError,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Success => "SUCCESS",
-            Self::KeepPolling => "KEEP_POLLING",
-            Self::VerifyHeaderCmacCheckError => "VERIFY_HEADER_CMAC_CHECK_ERROR",
-            Self::VerifyHeaderVersionCheckError => "VERIFY_HEADER_VERSION_CHECK_ERROR",
-            Self::VerifyCapabilityInfoError => "VERIFY_CAPABILITY_INFO_ERROR",
-            Self::VerifyFwBodyCmacCheckError => "VERIFY_FW_BODY_CMAC_CHECK_ERROR",
-            Self::VerifyCommonParamError => "VERIFY_COMMON_PARAM_ERROR",
-            Self::VerifyOtherError => "VERIFY_OTHER_ERROR",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct UpdateStatus {
     #[allow(dead_code)]
@@ -179,4 +74,34 @@ pub struct UpdateStatus {
     pub status_raw: u8,
     #[allow(dead_code)]
     pub raw: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn feature_report_includes_id_and_uses_little_endian_fields() {
+        let mut raw = vec![0; 64];
+        raw[0] = 0x20;
+        raw[1..12].copy_from_slice(b"Nov  1 2024");
+        raw[12..20].copy_from_slice(b"17:49:16");
+        raw[20..22].copy_from_slice(&2u16.to_le_bytes());
+        raw[22..24].copy_from_slice(&0xbu16.to_le_bytes());
+        raw[24..28].copy_from_slice(&0x1107u32.to_le_bytes());
+        raw[44..46].copy_from_slice(&0x0580u16.to_le_bytes());
+        let i = FirmwareInfo::parse(raw).unwrap();
+        assert_eq!(i.build_date, "Nov  1 2024");
+        assert_eq!(i.build_time, "17:49:16");
+        assert_eq!(i.firmware_version, 0x580);
+        assert_eq!(i.software_series, 0xb);
+        assert_eq!(i.hardware_info, 0x1107);
+        assert_eq!(i.firmware_type, 2);
+    }
+    #[test]
+    fn malformed_reports_are_rejected_before_field_reads() {
+        for size in [0, 20, 63, 65] {
+            assert!(FirmwareInfo::parse(vec![0x20; size]).is_err());
+        }
+        assert!(FirmwareInfo::parse(vec![0; 64]).is_err());
+    }
 }

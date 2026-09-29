@@ -1,282 +1,181 @@
 mod cli;
-mod hid;
 mod error;
+mod firmware;
+mod hid;
 mod protocol;
 mod update;
 
-use clap::{CommandFactory, Parser};
-use log::LevelFilter;
-
-use crate::cli::Args;
-use crate::error::{
-    AppError, FinalizeUpdateError, Result, StartUpdateError, UpdateFailure,
-    VerifyUpdateImageError, WriteUpdateImageError,
+use crate::{
+    cli::Args,
+    error::{AppError, Result},
+    hid::{DualSenseHid, find_first_device_path},
+    protocol::FirmwareInfo,
 };
-use crate::hid::{find_first_device_path, DualSenseHid};
-use crate::update::DualSenseUpdater;
+use clap::Parser;
 
 fn main() {
-    if std::env::args().len() == 1 {
-        print_help();
-        return;
-    }
-    let args = match Args::try_parse() {
-        Ok(args) => args,
-        Err(err) => {
-            use clap::error::ErrorKind;
-            match err.kind() {
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-                    println!("{err}");
-                }
-                _ => {
-                    print_help();
-                }
-            }
-            return;
-        }
-    };
-    init_logging(args.verbose);
+    let args = Args::parse();
+    env_logger::Builder::from_default_env()
+        .filter_level(if args.verbose {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
+        .format_timestamp(None)
+        .init();
     if let Err(err) = run(args) {
-        println!("{}", format_error(&err));
+        eprintln!("{err}");
         std::process::exit(1);
     }
 }
 
-fn run(args: Args) -> Result<()> {
-    if (args.start_update || args.write_update_image) && args.fw_image.is_empty() {
-        return Err(AppError::MissingFirmwareImageForUpdate);
-    }
-
-    let has_action = args.print_firmware_info
-        || args.start_update
-        || args.write_update_image
-        || args.verify_update_image
-        || args.finalize_update;
-
-    if !has_action {
-        if args.fw_image.is_empty() {
-            return Err(AppError::MissingFirmwareImageForInteractive);
-        }
-        println!("USE AT YOUR OWN RISK! There is no guarantee this won't brick your controller - but it probably won't.");
-        let device_path = find_first_device_path(args.vid, args.pid)?;
-        println!("Controller detected ({})", device_path);
-        let dev = DualSenseHid::open(args.vid, args.pid, Some(device_path.as_str()))?;
-        let updater = DualSenseUpdater::new(dev);
-
-        let info = updater.read_firmware_info()?;
-        println!("Current firmware version: 0x{:04x}", info.firmware_version);
-
-        let image_path = std::path::Path::new(&args.fw_image);
-        let target_version = DualSenseUpdater::firmware_version_from_image(image_path)?;
-        if prompt_yes_no(&format!(
-            "Do you want to flash the device to firmware version 0x{:04x}?",
-            target_version
-        ))? {
-            updater.start_update(image_path)?;
-            println!("StartUpdate status: SUCCESS (0x00)");
-            updater.write_update_image(image_path)?;
-            updater.verify_update_image()?;
-            println!("VerifyUpdate status: SUCCESS (0x00)");
-            updater.finalize_update()?;
-            println!("FinalizeUpdate sent");
-        }
-        return Ok(());
-    }
-
-    let device_path = if args.path.is_empty() {
-        let found = find_first_device_path(args.vid, args.pid)?;
-        println!("Device path: {}", found);
-        Some(found)
+fn print_info(info: &FirmwareInfo, path: &str, pid: u16, json: bool) -> Result<()> {
+    let target = firmware::target_for(info, pid)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"path":path,"pid":pid,"target":target,
+            "version":info.firmware_version,"version_hex":format!("0x{:04X}",info.firmware_version),
+            "build_date":info.build_date,"build_time":info.build_time,
+            "firmware_type":info.firmware_type,"image_type":info.image_type,"hardware_info":info.hardware_info,"software_series":info.software_series})
+        );
     } else {
-        println!("Device path: {}", args.path);
-        Some(args.path)
-    };
-    let dev = DualSenseHid::open(args.vid, args.pid, device_path.as_deref())?;
-    let updater = DualSenseUpdater::new(dev);
-
-    if args.print_firmware_info {
-        let info = updater.read_firmware_info()?;
-        println!("Current firmware build date: {}", info.build_date);
-        println!("Current firmware build time: {}", info.build_time);
-        println!("Current firmware version: 0x{:04x}", info.firmware_version);
+        println!("Controller: {path} (USB, 054c:{pid:04x})");
+        println!(
+            "Firmware: 0x{:04X} | Sony target: {target}",
+            info.firmware_version
+        );
+        println!(
+            "Built: {} {} | Hardware: 0x{:08X}",
+            info.build_date, info.build_time, info.hardware_info
+        );
     }
-
-    if args.start_update {
-        let image_path = std::path::Path::new(&args.fw_image);
-        updater.start_update(image_path)?;
-        println!("StartUpdate status: SUCCESS");
-    }
-
-    if args.write_update_image {
-        let image_path = std::path::Path::new(&args.fw_image);
-        updater.write_update_image(image_path)?;
-    }
-
-    if args.verify_update_image {
-        updater.verify_update_image()?;
-        println!("VerifyUpdate status: SUCCESS");
-    }
-
-    if args.finalize_update {
-        updater.finalize_update()?;
-        println!("FinalizeUpdate sent");
-    }
-
     Ok(())
 }
 
-fn init_logging(debug: bool) {
-    let mut builder = env_logger::Builder::from_default_env();
-    if debug {
-        builder.filter_level(LevelFilter::Debug);
+fn run(args: Args) -> Result<()> {
+    if args.vid != 0x054c || ![0x0ce6, 0x0df2].contains(&args.pid) {
+        return Err(AppError::Validation(
+            "Only Sony DualSense and DualSense Edge VID/PIDs are supported".into(),
+        ));
+    }
+    if args.list {
+        return hid::print_devices(args.vid, args.pid);
+    }
+    let path = if args.path.is_empty() {
+        find_first_device_path(args.vid, args.pid)?
     } else {
-        builder.filter_level(LevelFilter::Info);
+        args.path
+    };
+    let dev = DualSenseHid::open(args.vid, args.pid, &path)?;
+    let info = dev.get_firmware_info()?;
+    print_info(&info, &path, args.pid, args.json)?;
+    if args.print_firmware_info {
+        return Ok(());
     }
-    builder.format_timestamp(None).init();
-}
-
-fn print_help() {
-    let mut cmd = Args::command();
-    let _ = cmd.print_help();
-    println!();
-}
-
-fn format_error(err: &AppError) -> String {
-    match err {
-        AppError::UpdateFailed(failure) => {
-            let message = update_failure_message(failure);
-            format!("{message} ({})", update_failure_debug(failure))
+    let target = firmware::target_for(&info, args.pid)?;
+    let image = if let Some(local) = args.fw_image {
+        firmware::FirmwareImage::load(&local, &info, args.pid)?
+    } else {
+        let latest = firmware::latest(&target)?;
+        println!("Latest on Sony's server: 0x{latest:04X}");
+        if latest <= info.firmware_version {
+            println!("No newer firmware is available for this controller's series.");
+            return Ok(());
         }
-        AppError::DeviceNotFound { .. } => format!("{err} (0x00)"),
-        AppError::DevicePathNotMatched(_) => format!("{err} (0x00)"),
-        AppError::MissingFirmwareImageForUpdate => format!("{err} (0x00)"),
-        AppError::MissingFirmwareImageForInteractive => format!("{err} (0x00)"),
-        AppError::FirmwareImageTooSmall => format!("{err} (0x00)"),
-        AppError::FirmwareImageTooSmallForHeader => format!("{err} (0x00)"),
-        AppError::InvalidUpdateStreamLength(_) => format!("{err} (0x00)"),
-        AppError::UpdateImageTooLarge(_) => format!("{err} (0x00)"),
-        AppError::FirmwareInfoTooShort(_) => format!("{err} (0x00)"),
-        AppError::FirmwareInfoPayloadTooShort(_) => format!("{err} (0x00)"),
-        AppError::UpdateStatusEmpty => format!("{err} (0x00)"),
-        AppError::UpdateStatusMalformed(_) => format!("{err} (0x00)"),
-        AppError::UnexpectedUpdateStatusCommand(_, _) => format!("{err} (0x00)"),
-        AppError::Hid(_) => format!("{err} (0x00)"),
-        AppError::Io(_) => format!("{err} (0x00)"),
+        if !args.download_latest && !args.update_latest {
+            println!(
+                "Update available. Run with --download-latest to prepare it or --update-latest to install it."
+            );
+            return Ok(());
+        }
+        let (image, downloaded) = firmware::download(&target, latest, &info, args.pid)?;
+        println!("Downloaded: {}", downloaded.display());
+        if args.download_latest {
+            println!(
+                "Validated {} bytes | SHA-256: {}",
+                image.data.len(),
+                image.sha256
+            );
+            return Ok(());
+        }
+        image
+    };
+    let battery = dev.preflight_battery()?;
+    println!(
+        "Update: 0x{:04X} -> 0x{:04X} | Battery: approximately {battery}%",
+        info.firmware_version, image.version
+    );
+    println!(
+        "Validated {} bytes | SHA-256: {}",
+        image.data.len(),
+        image.sha256
+    );
+    println!(
+        "Keep the USB cable connected and the Mac awake. Writing firmware can commit before finalization."
+    );
+    if !args.yes && !prompt_yes_no("Install this firmware?")? {
+        println!("Update cancelled before writing.");
+        return Ok(());
     }
-}
-
-fn update_failure_message(failure: &UpdateFailure) -> String {
-    match failure {
-        UpdateFailure::StartUpdate(err) => start_update_message(*err),
-        UpdateFailure::WriteUpdateImage(err) => {
-            write_update_message(*err)
+    let updater = update::DualSenseUpdater::new(dev);
+    let outcome = updater.flash(&image.data);
+    drop(updater);
+    // The old macOS HID path may change when the controller re-enumerates.
+    let verified = verify_installed(args.vid, args.pid, &info, image.version);
+    match (outcome, verified) {
+        (Ok(()), Ok(current)) => println!(
+            "Verified installed firmware: 0x{:04X} ({} {}).",
+            current.firmware_version, current.build_date, current.build_time
+        ),
+        (Err(phase_error), Ok(current)) => println!(
+            "Verified installed firmware: 0x{:04X}. Controller rebooted/committed despite a protocol error: {phase_error}",
+            current.firmware_version
+        ),
+        (Err(phase_error), Err(_)) => {
+            return Err(AppError::Validation(format!(
+                "{phase_error}. Update not verified; reconnect and run --print-firmware-info before any retry"
+            )));
         }
-        UpdateFailure::VerifyUpdateImage(err) => {
-            verify_update_message(*err)
-        }
-        UpdateFailure::FinalizeUpdate(err) => {
-            finalize_update_message(*err)
-        }
+        (Ok(()), Err(e)) => return Err(e),
     }
+    Ok(())
 }
 
-fn update_failure_debug(failure: &UpdateFailure) -> String {
-    match failure {
-        UpdateFailure::StartUpdate(err) => format!("UpdateFailed(StartUpdate({err}))"),
-        UpdateFailure::WriteUpdateImage(err) => format!("UpdateFailed(WriteUpdateImage({err}))"),
-        UpdateFailure::VerifyUpdateImage(err) => format!("UpdateFailed(VerifyUpdateImage({err}))"),
-        UpdateFailure::FinalizeUpdate(err) => format!("UpdateFailed(FinalizeUpdate({err}))"),
-    }
-}
-
-fn start_update_message(err: StartUpdateError) -> String {
-    match err {
-        StartUpdateError::HeaderVersionCheckError => {
-            "Firmware image is not an upgrade; downgrades are not allowed.".to_string()
+fn verify_installed(
+    vid: u16,
+    pid: u16,
+    before: &FirmwareInfo,
+    expected: u16,
+) -> Result<FirmwareInfo> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Ok(path) = find_first_device_path(vid, pid)
+            && let Ok(dev) = DualSenseHid::open(vid, pid, &path)
+            && let Ok(info) = dev.get_firmware_info()
+            && info.software_series == before.software_series
+            && info.hardware_info == before.hardware_info
+            && info.firmware_version == expected
+        {
+            return Ok(info);
         }
-        StartUpdateError::HeaderCmacCheckError => {
-            "Firmware image header authentication failed.".to_string()
-        }
-        StartUpdateError::HeaderCapabilityInfoError => {
-            "Firmware image header capability info is invalid.".to_string()
-        }
-        StartUpdateError::HeaderFlashEraseError => {
-            "Device failed to erase flash for the update.".to_string()
-        }
-        StartUpdateError::HeaderInfoNotReceived => {
-            "Device did not receive the firmware header.".to_string()
-        }
-        StartUpdateError::HeaderCommonParamError => {
-            "Firmware image header parameters are invalid.".to_string()
-        }
-        StartUpdateError::HeaderOtherError => {
-            "Firmware image header failed for an unknown reason.".to_string()
-        }
-    }
-}
-
-fn write_update_message(err: WriteUpdateImageError) -> String {
-    match err {
-        WriteUpdateImageError::WriteImageFlashWriteError => {
-            "Device failed while writing the firmware image.".to_string()
-        }
-        WriteUpdateImageError::WriteUpdateNotStarted => {
-            "WriteUpdateImage was sent before StartUpdate completed.".to_string()
-        }
-        WriteUpdateImageError::WriteImageCommonParamError => {
-            "Firmware image parameters are invalid.".to_string()
-        }
-        WriteUpdateImageError::WriteImageOtherError => {
-            "Firmware image write failed for an unknown reason.".to_string()
-        }
-    }
-}
-
-fn verify_update_message(err: VerifyUpdateImageError) -> String {
-    match err {
-        VerifyUpdateImageError::VerifyHeaderCmacCheckError => {
-            "Firmware image header authentication failed during verify.".to_string()
-        }
-        VerifyUpdateImageError::VerifyHeaderVersionCheckError => {
-            "Firmware image is not an upgrade; downgrades are not allowed.".to_string()
-        }
-        VerifyUpdateImageError::VerifyCapabilityInfoError => {
-            "Firmware image capability info is invalid.".to_string()
-        }
-        VerifyUpdateImageError::VerifyFwBodyCmacCheckError => {
-            "Firmware image body authentication failed.".to_string()
-        }
-        VerifyUpdateImageError::VerifyCommonParamError => {
-            "Firmware image parameters are invalid.".to_string()
-        }
-        VerifyUpdateImageError::VerifyOtherError => {
-            "Firmware image verification failed for an unknown reason.".to_string()
-        }
-    }
-}
-
-fn finalize_update_message(err: FinalizeUpdateError) -> String {
-    match err {
-        FinalizeUpdateError::FinalizeOtherError => {
-            "FinalizeUpdate failed for an unknown reason.".to_string()
+        if std::time::Instant::now() >= deadline {
+            return Err(AppError::Validation(format!(
+                "Transfer finished but installed firmware 0x{expected:04X} could not be verified. Reconnect and run --print-firmware-info; do not assume the update succeeded"
+            )));
         }
     }
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {
     use std::io::{self, Write};
-    loop {
-        print!("{} [y/N] ", prompt);
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let reply = input.trim().to_lowercase();
-        if reply.is_empty() || reply == "n" || reply == "no" {
-            return Ok(false);
-        }
-        if reply == "y" || reply == "yes" {
-            return Ok(true);
-        }
-        println!("Please enter 'y' or 'n'.");
-    }
+    print!("{prompt} [y/N] ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }

@@ -3,3 +3,8 @@ target/
 
 **/*.rs.bk
 *.pdb
+
+firmware/
+diagnostics/
+__pycache__/
+.DS_Store
