@@ -3,9 +3,13 @@ name = "ds-mac-tools"
 version = "0.3.0"
 edition = "2024"
 license = "MIT"
-description = "An interactive macOS toolkit for DualSense controller firmware"
+description = "A DualSense workbench for Mac game developers"
 repository = "https://github.com/olliejudge/dsmactools"
 homepage = "https://github.com/olliejudge/dsmactools"
+
+[[bin]]
+name = "dsmactools"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -19,3 +23,10 @@ sha2 = "0.10"
 console = "0.16"
 dialoguer = { version = "0.12", default-features = false }
 indicatif = "0.18"
+crossterm = "0.29"
+signal-hook = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSDictionary", "NSString", "NSRunLoop", "NSDate", "NSObject"] }
+objc2-game-controller = { version = "0.3", default-features = false, features = ["std", "GCController", "GCDevice", "GCDeviceBattery", "GCDeviceHaptics", "GCDeviceLight", "GCMotion", "GCPhysicalInputProfile", "GCExtendedGamepad", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerElement"] }

@@ -1,7 +1,10 @@
 mod cli;
+mod diagnostics;
 mod error;
+mod feedback;
 mod firmware;
 mod hid;
+mod input;
 mod protocol;
 mod ui;
 mod update;
@@ -62,6 +65,12 @@ fn print_info(info: &FirmwareInfo, path: &str, pid: u16, json: bool) -> Result<(
 }
 
 fn run(args: Args) -> Result<()> {
+    if args.check_catalogue {
+        return firmware::check_catalogue();
+    }
+    if args.diagnostics {
+        return diagnostics::run();
+    }
     if args.vid != 0x054c || ![0x0ce6, 0x0df2].contains(&args.pid) {
         return Err(AppError::Validation(
             "Only Sony DualSense and DualSense Edge VID/PIDs are supported".into(),
@@ -76,6 +85,15 @@ fn run(args: Args) -> Result<()> {
         args.path
     };
     let dev = DualSenseHid::open(args.vid, args.pid, &path)?;
+    if args.monitor {
+        return input::monitor(&dev);
+    }
+    if let Some(file) = args.record {
+        return input::record(&dev, &file, args.duration, args.pid);
+    }
+    if let Some(preset) = args.feedback {
+        return feedback::run(&dev, preset, args.duration);
+    }
     let info = dev.get_firmware_info()?;
     print_info(&info, &path, args.pid, args.json)?;
     if args.print_firmware_info {

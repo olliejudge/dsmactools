@@ -8,3 +8,5 @@ firmware/
 diagnostics/
 __pycache__/
 .DS_Store
+
+dsmactools-capture-*.jsonl

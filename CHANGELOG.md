@@ -2,11 +2,15 @@
 
 ## 0.3.0
 
-- Rename the application to DS Mac Tools and the executable to `ds-mac-tools`.
+- Rename the application to DS Mac Tools and the executable to `dsmactools`.
 - Add an interactive terminal menu with controller status, battery level, live update checks, controller selection, downloads and installation.
 - Show progress during firmware transfer and keep installation confirmation enabled in the menu.
 - Store downloaded firmware in the user's cache, with an optional directory override.
-- Add Homebrew installation through `olliejudge/tap`.
+- Add the live USB input monitor and JSONL session recording with arrival timing and axis/button summaries.
+- Add timed rumble, lightbar and adaptive trigger presets with cancellation cleanup.
+- Add Mac developer diagnostics and native GameController capability inspection through Rust bindings.
+- Move the Sony catalogue checker into Rust and remove the Python helper.
+- Add Homebrew installation as `dsmactools` through `olliejudge/tap`.
 
 ## 0.2.0
 

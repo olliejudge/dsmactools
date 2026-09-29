@@ -4,9 +4,11 @@ pub const DEFAULT_VID: u16 = 0x054c;
 pub const DEFAULT_PID: u16 = 0x0ce6;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "ds-mac-tools", version,
-    about = "DS Mac Tools: interactive DualSense firmware updates on macOS.",
-    group(ArgGroup::new("action").args(["print_firmware_info", "check", "download_latest", "update_latest", "fw_image", "list"]).multiple(false)))]
+#[command(name = "dsmactools", version,
+    about = "DS Mac Tools: a controller workbench for Mac game developers.",
+    group(ArgGroup::new("update_action").args(["fw_image", "update_latest"])),
+    group(ArgGroup::new("timed_action").args(["record", "feedback"])),
+    group(ArgGroup::new("action").args(["print_firmware_info", "check", "download_latest", "update_latest", "fw_image", "list", "check_catalogue", "monitor", "record", "feedback", "diagnostics"]).multiple(false)))]
 pub struct Args {
     #[arg(long, value_parser = parse_u16, default_value_t = DEFAULT_VID)]
     pub vid: u16,
@@ -26,6 +28,11 @@ pub struct Args {
     pub check: bool,
     #[arg(
         long,
+        help = "Check Sony's full catalogue against the release baseline; no controller needed."
+    )]
+    pub check_catalogue: bool,
+    #[arg(
+        long,
         help = "Download the latest compatible official firmware without flashing."
     )]
     pub download_latest: bool,
@@ -43,12 +50,13 @@ pub struct Args {
         long,
         help = "Output controller information as JSON; read-only.",
         requires = "print_firmware_info",
-        conflicts_with_all = ["check", "download_latest", "update_latest", "fw_image", "list"]
+        conflicts_with_all = ["check", "download_latest", "update_latest", "fw_image", "list", "check_catalogue", "monitor", "record", "feedback", "diagnostics"]
     )]
     pub json: bool,
     #[arg(
         long,
-        help = "Confirm a firmware update without an interactive prompt."
+        help = "Confirm a firmware update without an interactive prompt.",
+        requires = "update_action"
     )]
     pub yes: bool,
     #[arg(
@@ -59,7 +67,33 @@ pub struct Args {
     pub path: String,
     #[arg(short = 'v', long, help = "Enable protocol debugging.")]
     pub verbose: bool,
-    #[arg(long, help = "Open the interactive menu (the default in a terminal).", conflicts_with_all = ["print_firmware_info", "check", "download_latest", "update_latest", "fw_image", "list", "json", "yes"])]
+    #[arg(long, help = "Live USB input viewer (terminal required).")]
+    pub monitor: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Record raw and decoded USB inputs as JSONL; never overwrites a file."
+    )]
+    pub record: Option<std::path::PathBuf>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Run a timed rumble, lightbar or adaptive trigger test."
+    )]
+    pub feedback: Option<crate::feedback::Preset>,
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Capture duration (1–3600s) or feedback duration (1–30s).",
+        requires = "timed_action"
+    )]
+    pub duration: u64,
+    #[arg(
+        long,
+        help = "Print Mac toolchain and native GameController diagnostics as JSON."
+    )]
+    pub diagnostics: bool,
+    #[arg(long, help = "Open the interactive menu (the default in a terminal).", conflicts_with_all = ["print_firmware_info", "check", "download_latest", "update_latest", "fw_image", "list", "json", "yes", "check_catalogue", "monitor", "record", "feedback", "diagnostics"])]
     pub interactive: bool,
     #[arg(
         long,
@@ -76,6 +110,11 @@ impl Args {
             || self.update_latest
             || self.fw_image.is_some()
             || self.list
+            || self.check_catalogue
+            || self.monitor
+            || self.record.is_some()
+            || self.feedback.is_some()
+            || self.diagnostics
     }
 }
 
@@ -99,6 +138,12 @@ mod tests {
         assert!(Args::try_parse_from(["tool", "--json", "--update-latest"]).is_err());
         assert!(Args::try_parse_from(["tool", "--start-update-only"]).is_err());
         assert!(Args::try_parse_from(["tool", "--invalid"]).is_err());
+        assert!(Args::try_parse_from(["tool", "--monitor", "--update-latest"]).is_err());
+        assert!(Args::try_parse_from(["tool", "--feedback", "rumble", "--yes"]).is_err());
+        assert!(Args::try_parse_from(["tool", "--duration", "5"]).is_err());
+        assert!(
+            Args::try_parse_from(["tool", "--record", "test.jsonl", "--duration", "5"]).is_ok()
+        );
     }
     #[test]
     fn interactive_mode_cannot_bypass_update_confirmation() {

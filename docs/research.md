@@ -51,6 +51,24 @@ The final read from the finished build independently confirmed version `0x0630` 
 
 ## DS Mac Tools 0.3.0
 
-The executable was renamed to `ds-mac-tools` and given an interactive menu inspired by Mole. Read-only menu navigation was exercised in a real pseudo-terminal against the updated controller: automatic USB detection, 100% battery, live current-version status, Controller details, return to menu, and Escape to exit. JSON controller inspection remains available. No second hardware flash was needed for the terminal presentation changes. Twelve regression tests cover the shared update guards, CLI mode selection and cache override.
+The executable was renamed to `ds-mac-tools` and given an interactive menu inspired by Mole. Read-only menu navigation was exercised in a real pseudo-terminal against the updated controller: automatic USB detection, 100% battery, live current-version status, Controller details, return to menu, and Escape to exit. JSON controller inspection remains available. No second hardware flash was needed for the terminal presentation changes. Regression tests cover the shared update guards, CLI mode selection and cache override.
 
 Homebrew source installation is provided in the existing `olliejudge/homebrew-tap` as an independent formula, alongside the untouched Orion cask. Source installation avoids a requirement for distributing a signed/notarized executable. The release source archive is checksum-pinned and builds with Cargo's committed lockfile.
+
+
+The catalogue watcher is now implemented in Rust as `ds-mac-tools --check-catalogue`. It shares the application’s HTTPS/JSON path and compares all published keys with an embedded release baseline. This command does not enumerate or open HID devices, and returns a failure when versions, keys or metadata shape change. The earlier standalone Python helper was removed.
+
+## Developer workbench validation (2026-09-29)
+
+The 0.3.0 executable/formula is `dsmactools`. The workbench adds live USB input inspection, JSONL captures, timed output presets, and Mac environment/native GameController diagnostics, all implemented in Rust. USB report layouts and trigger effect fields were checked against the documented structures in [dualsensectl](https://github.com/nowrep/dualsensectl/blob/master/main.c); the implementation sends independent 0x02 output reports rather than firmware feature commands. Motion remains raw rather than assuming calibrated units.
+
+On the same standard Type 000B controller with firmware 0630:
+
+- A two-second capture recorded 502 correctly sized raw/decoded reports, about 250 reports/s. Metadata, every sample and the final count were parsed and checked. This is host arrival rate, not game latency.
+- Terminal menu navigation, live input rendering and q/Esc return paths were exercised using a real PTY.
+- One-second rumble, blue-lightbar and mild adaptive-trigger output transfers completed, followed by reset transfers. Physical sensation/color were not independently measured; successful HID transfer is the tested result.
+- Native GameController discovery exposed the DualSense's extended gamepad, motion, haptics, light, battery, 10 axis aliases and 34 button aliases. Discovery must initialize before pumping the main run loop; querying for the first time after waiting gave an empty snapshot.
+- macOS 27.0, arm64, Xcode 27.1 beta, Swift 6.4 and the Metal compiler were detected. Missing tools remain explicit availability failures rather than being installed by the app.
+- Concurrent HID clients can cause exclusive-access errors. Tests were then run sequentially. Users should close other controller tools.
+
+The 16 Rust tests cover malformed reports, button/touch/signed-motion decoding, output report flags/effect reset, CLI action separation, catalogue changes, firmware compatibility and update sequencing. No additional firmware flash was performed for these UI/developer checks. Edge feedback/input and Intel execution are not hardware-tested.

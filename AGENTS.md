@@ -8,9 +8,9 @@ This is a macOS-first fork of nchie/dualsense-updater-rs. Preserve the MIT licen
 - A transfer or finalize status is not proof of an installed update. Read the controller after re-enumeration; avoid automatic reflashing on errors.
 - Firmware images, manifests and private diagnostics remain ignored. Do not add Sony binaries to Git.
 - Read `docs/research.md` for tested hardware and protocol sources. New controller targets or image formats need source review before support is added.
-- Validate changes with `cargo fmt --check`, `cargo test --locked`, and `cargo clippy --locked -- -D warnings`. Use `python3 scripts/check_catalogue.py` for a live metadata check without opening hardware.
+- Validate changes with `cargo fmt --check`, `cargo test --locked`, and `cargo clippy --locked -- -D warnings`. Use `cargo run --locked -- --check-catalogue` for a live metadata check without opening hardware.
 - Update the research log after hardware tests. Only advance `catalogue-baseline.json` after reviewing a detected change.
 
-- The executable and Homebrew formula are named `ds-mac-tools`. The repository remains `dsmactools`.
+- The executable and Homebrew formula are named `dsmactools`. The repository remains `dsmactools`.
 - The default terminal experience is interactive; scripted runs remain read-only by default. Route menu actions through the shared validated update path.
 - Follow `docs/releasing.md` for tagged source releases and tap updates. Preserve existing packages in the shared Homebrew tap.

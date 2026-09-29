@@ -73,6 +73,63 @@ pub fn latest(target: &str) -> Result<u16> {
     parse_catalogue(&fetch(&format!("{SONY_BASE}/info.json"))?, target)
 }
 
+/// Compare every published catalogue entry with this release's embedded baseline.
+/// This command never enumerates or opens a controller.
+pub fn catalogue_report(data: &[u8]) -> Result<serde_json::Value> {
+    let current: serde_json::Value = serde_json::from_slice(data)
+        .map_err(|e| invalid(format!("Invalid Sony catalogue: {e}")))?;
+    let current = current
+        .as_object()
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| invalid("Empty or malformed Sony catalogue"))?;
+    for (key, value) in current {
+        if key.starts_with("FwUpdate") {
+            let target = key
+                .strip_prefix("FwUpdate")
+                .and_then(|k| k.strip_suffix("LatestVersion"))
+                .filter(|t| t.len() == 4 && t.bytes().all(|b| b.is_ascii_hexdigit()));
+            let target = target
+                .ok_or_else(|| invalid(format!("Unexpected firmware catalogue key: {key}")))?;
+            parse_catalogue(data, target)?;
+        }
+        if !value.is_string() {
+            return Err(invalid(format!("Invalid catalogue value for {key}")));
+        }
+    }
+    let baseline: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../catalogue-baseline.json"))
+            .map_err(|e| invalid(format!("Invalid embedded catalogue baseline: {e}")))?;
+    let baseline = baseline
+        .as_object()
+        .ok_or_else(|| invalid("Invalid embedded catalogue baseline"))?;
+    let keys = baseline
+        .keys()
+        .chain(current.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    let changes=keys.into_iter().filter(|key|baseline.get(*key)!=current.get(*key))
+        .map(|key|serde_json::json!({"key":key,"previous":baseline.get(key),"current":current.get(key)})).collect::<Vec<_>>();
+    Ok(
+        serde_json::json!({"source":format!("{SONY_BASE}/info.json"),"catalogue":current,"changes":changes}),
+    )
+}
+
+pub fn check_catalogue() -> Result<()> {
+    let report = catalogue_report(&fetch(&format!("{SONY_BASE}/info.json"))?)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).map_err(|e| invalid(e.to_string()))?
+    );
+    if report["changes"]
+        .as_array()
+        .is_some_and(|changes| !changes.is_empty())
+    {
+        return Err(invalid(
+            "Sony's catalogue changed. Review the changes before updating catalogue-baseline.json.",
+        ));
+    }
+    Ok(())
+}
+
 pub struct FirmwareImage {
     pub data: Vec<u8>,
     pub version: u16,
@@ -247,5 +304,32 @@ mod tests {
             cache_directory(Some(Path::new("/tmp/ds-test-cache"))).unwrap(),
             PathBuf::from("/tmp/ds-test-cache")
         );
+    }
+    #[test]
+    fn full_catalogue_detects_versions_new_targets_and_removed_entries() {
+        let baseline: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../catalogue-baseline.json")).unwrap();
+        let report = catalogue_report(&serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert!(report["changes"].as_array().unwrap().is_empty());
+        let mut changed = baseline.clone();
+        changed["FwUpdate000BLatestVersion"] = serde_json::json!("0x0701");
+        changed["FwUpdate0099LatestVersion"] = serde_json::json!("0x0001");
+        changed
+            .as_object_mut()
+            .unwrap()
+            .remove("FwUpdate0044LatestVersion");
+        let report = catalogue_report(&serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert_eq!(report["changes"].as_array().unwrap().len(), 3);
+    }
+    #[test]
+    fn full_catalogue_rejects_empty_or_malformed_metadata() {
+        for data in [
+            b"{}".as_slice(),
+            b"[]",
+            br#"{"FwUpdate000BLatestVersion":"garbage"}"#,
+            br#"{"FwUpdate../../LatestVersion":"0x0701"}"#,
+        ] {
+            assert!(catalogue_report(data).is_err());
+        }
     }
 }

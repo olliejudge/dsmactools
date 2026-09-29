@@ -37,6 +37,26 @@ impl DualSenseHid {
         Ok(Self { _api: api, dev })
     }
 
+    pub fn read_input(&self, timeout_ms: i32) -> Result<Option<Vec<u8>>> {
+        let mut raw = [0u8; 64];
+        let size = self.dev.read_timeout(&mut raw, timeout_ms)?;
+        if size == 0 {
+            return Ok(None);
+        }
+        Ok(Some(raw[..size].to_vec()))
+    }
+
+    pub fn write_output(&self, report: &[u8]) -> Result<()> {
+        let sent = self.dev.write(report)?;
+        if sent != report.len() {
+            return Err(AppError::Validation(format!(
+                "Short output report: {sent}/{}",
+                report.len()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn get_firmware_info(&self) -> Result<FirmwareInfo> {
         let raw = self.get_feature_report(REPORT_ID_FIRMWARE_INFO, 64)?;
         log::debug!("Firmware report: {:02x?}", raw);

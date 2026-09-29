@@ -6,7 +6,7 @@ use crate::{
     protocol::FirmwareInfo,
 };
 use console::{Term, style};
-use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{io::IsTerminal, time::Duration};
 
@@ -76,7 +76,10 @@ fn heading(term: &Term) -> Result<()> {
         style("DS MAC TOOLS").cyan().bold(),
         style(env!("CARGO_PKG_VERSION")).dim()
     ))?;
-    term.write_line(&format!("  {}", style("Your DualSense, up to date.").dim()))?;
+    term.write_line(&format!(
+        "  {}",
+        style("A controller workbench for Mac developers.").dim()
+    ))?;
     term.write_line("")?;
     Ok(())
 }
@@ -205,10 +208,11 @@ pub fn run(mut args: Args) -> Result<()> {
         }
         dashboard(&term, status.as_ref(), error.as_deref())?;
         let items = [
-            "Check for updates",
-            "Install latest firmware",
-            "Controller details",
-            "Download firmware",
+            "Live input monitor",
+            "Record a test session",
+            "Feedback lab",
+            "Developer diagnostics",
+            "Firmware & controller details",
             "Refresh / choose controller",
             "About DS Mac Tools",
             "Quit",
@@ -226,55 +230,115 @@ pub fn run(mut args: Args) -> Result<()> {
             break;
         };
         match choice {
-            0 => {
-                refresh = true;
-            }
-            4 => {
+            5 => {
                 selected = None;
                 args.path.clear();
                 refresh = true;
             }
-            5 => {
+            6 => {
                 heading(&term)?;
-                term.write_line(
-                    "  A macOS toolkit for DualSense firmware, inspired by dualsense-updater-rs.",
-                )?;
-                term.write_line("  Terminal interaction inspired by Mole.")?;
-                term.write_line(
-                    "  Independent, unofficial software. Not endorsed by Sony or PlayStation.",
-                )?;
+                term.write_line("  A controller workbench for Mac game developers and testers.")?;
+                term.write_line("  Firmware inspired by dualsense-updater-rs; terminal interaction inspired by Mole.")?;
+                term.write_line("  Independent software. Not endorsed by Sony or PlayStation.")?;
                 term.write_line("  https://github.com/olliejudge/dsmactools")?;
                 pause(&term)?;
             }
-            6 => break,
+            7 => break,
+            3 => {
+                heading(&term)?;
+                if let Err(e) = crate::diagnostics::run() {
+                    term.write_line(&format!("  {}", style(e).red()))?;
+                }
+                pause(&term)?;
+            }
             _ => {
                 let Some(s) = status.as_ref() else {
-                    term.write_line(
-                        "
-  No controller is ready. Connect it and refresh first.",
-                    )?;
+                    term.write_line("  No controller is ready. Connect it and refresh first.")?;
                     pause(&term)?;
                     continue;
                 };
-                // UI actions always use the validated shared CLI path and its preflight.
                 let mut action = args.clone();
                 action.interactive = false;
                 action.yes = false;
                 action.pid = s.controller.pid;
                 action.path = s.controller.path.clone();
-                action.print_firmware_info = choice == 2;
-                action.update_latest = choice == 1;
-                action.download_latest = choice == 3;
                 heading(&term)?;
+                match choice {
+                    0 => action.monitor = true,
+                    1 => {
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(ui_error)?
+                            .as_secs();
+                        let path: String = Input::with_theme(&theme)
+                            .with_prompt("Capture file")
+                            .default(format!("dsmactools-capture-{stamp}.jsonl"))
+                            .interact_text()
+                            .map_err(ui_error)?;
+                        action.duration = Input::with_theme(&theme)
+                            .with_prompt("Duration in seconds (1–3600)")
+                            .default(10u64)
+                            .validate_with(|v: &u64| {
+                                if (1..=3600).contains(v) {
+                                    Ok(())
+                                } else {
+                                    Err("Choose 1–3600 seconds")
+                                }
+                            })
+                            .interact_text()
+                            .map_err(ui_error)?;
+                        action.record = Some(path.into());
+                    }
+                    2 => {
+                        let Some(preset) = Select::with_theme(&theme)
+                            .with_prompt("Timed feedback test · effects stop after 5 seconds")
+                            .items([
+                                "Gentle rumble",
+                                "Blue lightbar",
+                                "Mild adaptive trigger resistance",
+                            ])
+                            .interact_on_opt(&term)
+                            .map_err(ui_error)?
+                        else {
+                            continue;
+                        };
+                        action.feedback = Some(
+                            [
+                                crate::feedback::Preset::Rumble,
+                                crate::feedback::Preset::Lightbar,
+                                crate::feedback::Preset::Triggers,
+                            ][preset],
+                        );
+                        action.duration = 5;
+                    }
+                    4 => {
+                        let Some(firmware_action) = Select::with_theme(&theme)
+                            .with_prompt("Firmware & controller details")
+                            .items([
+                                "Check for updates",
+                                "Controller details",
+                                "Download latest firmware",
+                                "Install latest firmware",
+                            ])
+                            .interact_on_opt(&term)
+                            .map_err(ui_error)?
+                        else {
+                            continue;
+                        };
+                        action.check = firmware_action == 0;
+                        action.print_firmware_info = firmware_action == 1;
+                        action.download_latest = firmware_action == 2;
+                        action.update_latest = firmware_action == 3;
+                    }
+                    _ => unreachable!(),
+                }
                 if let Err(e) = crate::run(action) {
-                    term.write_line(&format!(
-                        "
-  {}",
-                        style(e).red()
-                    ))?;
+                    term.write_line(&format!("\n  {}", style(e).red()))?;
                 }
                 pause(&term)?;
-                refresh = true;
+                if choice == 4 {
+                    refresh = true;
+                }
             }
         }
     }

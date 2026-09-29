@@ -1,22 +1,22 @@
 # DS Mac Tools
 
-**Keep your DualSense up to date, from your Mac.**
+**A controller workbench for Mac game developers and testers.**
 
-DS Mac Tools is a small, interactive terminal app for checking and updating PlayStation DualSense controller firmware over USB. Plug in your controller, open the menu, and it checks Sony's latest firmware for your hardware.
+Inspect live inputs, record test sessions, try controller feedback, check your Mac development environment, and keep DualSense firmware current. One Rust terminal application, with a keyboard menu and scriptable commands.
 
 ```text
   DS MAC TOOLS
-  Your DualSense, up to date.
+  A controller workbench for Mac developers.
 
   ●  DualSense Wireless Controller
      USB connected  ·  100% battery
      Up to date  ·  Firmware 0630
 
-  ↑/↓ to move  ·  Enter to select  ·  Esc to quit
-  ❯ Check for updates
-    Install latest firmware
-    Controller details
-    Download firmware
+  ❯ Live input monitor
+    Record a test session
+    Feedback lab
+    Developer diagnostics
+    Firmware & controller details
     Refresh / choose controller
     About DS Mac Tools
     Quit
@@ -24,101 +24,107 @@ DS Mac Tools is a small, interactive terminal app for checking and updating Play
 
 ## Install
 
-With [Homebrew](https://brew.sh):
+Add the tap once, then install:
 
 ```sh
-brew install olliejudge/tap/ds-mac-tools
+brew tap olliejudge/tap
+brew install dsmactools
 ```
 
-Then connect your controller with a **USB data cable** and run:
+Or use the fully qualified command:
 
 ```sh
-ds-mac-tools
+brew install olliejudge/tap/dsmactools
 ```
 
-The menu shows your controller's firmware, battery level, and whether an update is available. Use the arrow keys and Enter to choose an action. Installation asks for confirmation before writing firmware.
+Connect a DualSense with a **USB data cable** and run `dsmactools`. Use arrow keys and Enter; Esc returns or exits. The existing Orion cask in this tap is independent and unchanged.
 
-The first Homebrew release builds locally from a checksum-verified source archive, with Rust installed as a build dependency. It supports Apple Silicon and Intel Macs. No Apple Developer account, driver replacement, or administrator access is required to run the tool.
-
-To update DS Mac Tools itself:
+The source formula installs Rust as a build dependency. Running the tool needs no Apple Developer account, driver replacement or administrator access. Apple Silicon is hardware-tested; Intel builds use the same source formula. This release is distributed through our tap, not Homebrew core. On a fresh machine, bare `brew install dsmactools` requires the tap setup above.
 
 ```sh
 brew update
-brew upgrade olliejudge/tap/ds-mac-tools
+brew upgrade dsmactools
 ```
 
-## What it does
+## The workbench
 
-- Detects USB-connected controllers and lets you choose between them.
-- Reads the controller's software series to select its matching firmware branch.
-- Checks Sony's live catalogue each time you refresh or request an update.
-- Downloads firmware directly from Sony and validates its model, branch, size and version.
-- Checks the controller's battery before installation and shows transfer progress.
-- Reopens the controller after installation and reads back the installed version.
+| Tool | Use |
+| --- | --- |
+| Live input monitor | Sticks, buttons, triggers, touch contacts, raw gyro and accelerometer values; host report rate |
+| Session capture | JSONL metadata, raw USB packets, decoded inputs, timing, axis ranges and buttons seen |
+| Feedback lab | Gentle rumble, blue lightbar and mild adaptive trigger resistance, with timed cleanup |
+| Developer diagnostics | macOS/architecture, Xcode/Swift/Metal tool availability, USB controllers and Apple's native GameController profiles |
+| Firmware | Live Sony catalogue, validated downloads, battery preflight, installation and installed-version verification |
 
-Already-current firmware, reflashing and downgrades are skipped or refused. A higher version for another hardware branch does not mean your controller is out of date.
+Input tools are read-only. Feedback tests change volatile controller effects, stop after the chosen duration, and attempt cleanup on cancellation or errors. Cleanup disables rumble/resistance and releases lightbar control; it does not reconstruct another app's previous effects. Close games and other controller tools before USB tests. Abrupt process termination or cable loss can prevent cleanup; reconnect the controller if needed.
 
-## Command-line use
+Capture timing measures **host report arrival**, not game latency or button-to-screen latency. Motion values are raw sensor counts, without calibration or conversion to physical units. Stick values are normalized to −1…1 without a dead zone. The native GameController snapshot is distinct from direct USB HID access: a device visible over USB may not appear in the framework snapshot. Developer diagnostics also work without a DualSense attached and can list other controllers exposed by macOS.
 
-For scripts, troubleshooting, or a quick check:
+## Commands
 
 ```sh
-ds-mac-tools --check                       # Check for an update without installing
-ds-mac-tools --print-firmware-info         # Read controller details
-ds-mac-tools --print-firmware-info --json  # Machine-readable details
-ds-mac-tools --download-latest             # Download and validate without installing
-ds-mac-tools --update-latest               # Install after confirmation
-ds-mac-tools --list                        # List available HID interfaces
-ds-mac-tools --help
+dsmactools --monitor
+dsmactools --record session.jsonl --duration 10
+dsmactools --feedback rumble --duration 3
+dsmactools --feedback lightbar --duration 5
+dsmactools --feedback triggers --duration 5
+dsmactools --diagnostics > diagnostics.json
+
+dsmactools --check
+dsmactools --print-firmware-info --json
+dsmactools --download-latest
+dsmactools --update-latest
+dsmactools --list
+dsmactools --check-catalogue
+dsmactools --help
 ```
 
-A terminal opens the interactive menu by default. Non-interactive runs default to a read-only update check. `--interactive` explicitly opens the menu and requires a terminal. `--yes` skips installation confirmation only when paired with an update command. Use `--path PATH` to select an exact USB HID interface for command-line actions.
+Capture files are never overwritten. Durations are 1–3600 seconds for recordings and 1–30 seconds for feedback; the menu uses five-second feedback tests. Press q, Esc or Ctrl-C to stop a live tool. Captures contain one metadata row, sample rows with `elapsed_us`, `raw` and `input`, then a summary row. `cancelled` indicates an early stop and `complete` indicates whether the recording finished without an error. Capture schema version is 1.
 
-Firmware and source manifests are saved under `~/Library/Caches/ds-mac-tools/firmware`, with their URL, size and SHA-256 checksum. Use `--cache-dir DIRECTORY` to choose a different location. Firmware files are not bundled with the app or committed to this repository.
+A terminal opens the menu by default. Non-interactive runs default to a read-only firmware check. `--interactive` requires a terminal. `--yes` is accepted only with a firmware write command. Use `--path PATH` to select an exact USB interface; ambiguous device selections are refused. For Edge CLI actions, add `--pid 0x0df2`.
 
-## Controller support
+Firmware and source manifests are cached in `~/Library/Caches/ds-mac-tools/firmware`, including the URL, size and SHA-256 checksum. Use `--cache-dir DIRECTORY` to override it. Sony firmware is downloaded separately and never bundled in this project.
 
-| Controller | Status |
+## Hardware support
+
+| Controller / connection | Status |
 | --- | --- |
-| Standard DualSense | USB update tested on Type `000B`, from `0580` to `0630` |
-| Standard DualSense Types `0004` and `000E` | Firmware branch recognized; not hardware-tested here |
-| DualSense Edge | Detected; update path available, but not hardware-tested here |
-| Bluetooth connections | Firmware installation not supported |
+| Standard DualSense, USB | Input monitor/capture and output transfers tested; Type `000B` firmware update tested from `0580` to `0630` |
+| Standard DualSense Types `0004` / `000E` | Firmware branches recognized; not hardware-tested here |
+| DualSense Edge, USB | Detected and common protocol supported; not hardware-tested here; extra Edge controls are not decoded |
+| Bluetooth | May appear in native GameController diagnostics; direct input/feedback/firmware tools require USB |
+| Other controllers | Native GameController diagnostics only |
 
-The interactive menu detects both standard and Edge controllers. For Edge command-line actions, add `--pid 0x0df2`.
+## Firmware installation
 
-## Before installing firmware
+The updater selects firmware using the controller's actual software series. It validates the image's model, branch, size and version, requires at least 10% battery, keeps all update phases together, and reopens the controller to verify the installed version. It refuses unknown branches, reflashing and downgrades.
 
-Keep the USB cable connected and your Mac awake until the installed version is verified. Close games and other software using the controller. The tool requires at least 10% battery and refuses unknown firmware branches or image formats.
-
-Controller firmware writes carry a risk of leaving the device unusable. The original updater's author observed that writing can commit an update before the verify/finalize steps. If an installation reports an error, reconnect and check the installed version before retrying; the update may already have committed. SHA-256 records the downloaded file and is not an independent authenticity signature. The controller performs its own firmware authentication.
+Keep the USB cable connected and your Mac awake until verification finishes. Firmware writes carry a risk of leaving a device unusable. Writing can commit before verify/finalize completes. If an update reports an error, reconnect and check the installed version before retrying. A recorded SHA-256 is not an independent authenticity signature; the controller performs firmware authentication.
 
 Sony's official updater, [PlayStation Accessories](https://controller.dl.playstation.net/controller/lang/en/2100004.html), is available for Windows.
 
-## Build and contribute
+## Build and maintain
 
 ```sh
 git clone https://github.com/olliejudge/dsmactools.git
 cd dsmactools
 cargo build --release --locked
-./target/release/ds-mac-tools
+./target/release/dsmactools
 ```
-
-Before submitting changes:
 
 ```sh
 cargo fmt --check
 cargo test --locked
 cargo clippy --locked -- -D warnings
-python3 scripts/check_catalogue.py
+cargo run --locked -- --check-catalogue
 ```
 
-GitHub Actions tests the project on macOS and Linux. A daily check flags changes to Sony's firmware catalogue for review. It never flashes hardware or silently accepts a new firmware format. Protocol sources, implementation notes and real hardware validation are in [the research log](docs/research.md). Release and Homebrew maintenance are documented in [the release guide](docs/releasing.md).
+GitHub Actions tests macOS and Linux. A daily **Rust** catalogue check flags changed, added or removed Sony metadata for review; it never flashes hardware or silently approves new firmware formats. There is no Python runtime or catalogue helper. See the [research log](docs/research.md), [capture format](docs/captures.md), and [release guide](docs/releasing.md).
 
 ## Credits and independence
 
-DS Mac Tools is inspired by and derived from [nchie/dualsense-updater-rs](https://github.com/nchie/dualsense-updater-rs). Its original MIT license and commit history are preserved. Firmware protocol research also draws on [nowrep/dualsensectl](https://github.com/nowrep/dualsensectl) and [daidr/dualsense-tester](https://github.com/daidr/dualsense-tester). The keyboard-driven terminal experience is inspired by [Mole](https://github.com/tw93/Mole).
+Inspired by and derived from [nchie/dualsense-updater-rs](https://github.com/nchie/dualsense-updater-rs), with its original MIT license and history preserved. Protocol research references [nowrep/dualsensectl](https://github.com/nowrep/dualsensectl), [daidr/dualsense-tester](https://github.com/daidr/dualsense-tester) and [Apple's GameController documentation](https://developer.apple.com/documentation/gamecontroller). The keyboard terminal experience is inspired by [Mole](https://github.com/tw93/Mole).
 
-**This is an independent, unofficial project. It is not affiliated with, sponsored by, approved by, or endorsed by Sony Interactive Entertainment or PlayStation.** DualSense and PlayStation are trademarks of their respective owners. Firmware remains Sony's property and is downloaded separately from Sony's servers.
+**Independent, unofficial software. Not affiliated with, sponsored by, approved by or endorsed by Sony Interactive Entertainment or PlayStation.** DualSense and PlayStation are trademarks of their respective owners. Firmware remains Sony's property.
 
 MIT licensed. See [LICENSE](LICENSE).
