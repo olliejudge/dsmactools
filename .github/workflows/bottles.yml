@@ -44,6 +44,11 @@ jobs:
           if [ "$(uname -m)" = x86_64 ]; then
             # Homebrew no longer publishes Intel Rust dependency bottles.
             # Use the pinned compiler above; this app has no runtime dependencies.
+            # Homebrew isolates HOME, so use real binaries rather than rustup proxies.
+            toolchain_bin=$(dirname "$(rustup which --toolchain 1.98.1 cargo)")
+            export PATH="$toolchain_bin:$PATH"
+            cargo --version
+            rustc --version
             brew install --build-bottle --ignore-dependencies olliejudge/tap/dsmactools
           else
             brew install --build-bottle olliejudge/tap/dsmactools
