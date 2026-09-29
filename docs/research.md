@@ -43,7 +43,7 @@ SHA-256: `b66528795683d214ca06fe4672d298de75bf019bd5046442cbec63fc02974f86`, als
 
 This is one standard DualSense hardware test. Edge and other hardware revisions are not hardware-tested by this project. Protocol tests cannot substitute for hardware coverage.
 
-Final local validation: ten regression tests passed, Rust formatting and Clippy with warnings denied passed, the release build succeeded, and the live Sony catalogue watcher reported no changes against the saved baseline. GitHub CI has been configured but has not run remotely.
+At the initial firmware validation, ten regression tests, Rust formatting, Clippy with warnings denied and the release build passed. The live Sony catalogue watcher reported no changes against the saved baseline. Subsequent workbench and release validation is recorded below.
 
 
 The final read from the finished build independently confirmed version `0x0630` and a new macOS HID path after re-enumeration. Its firmware report type had changed from `2` to `3`, while software series stayed `000B` and hardware info stayed `0x00001107`. The image header field at 0x60 (`2`) therefore must not be equated to the firmware report type. The final validator checks PID and software series, and a regression test covers this transition so later updates are not incorrectly blocked.
@@ -72,3 +72,13 @@ On the same standard Type 000B controller with firmware 0630:
 - Concurrent HID clients can cause exclusive-access errors. Tests were then run sequentially. Users should close other controller tools.
 
 The 16 Rust tests cover malformed reports, button/touch/signed-motion decoding, output report flags/effect reset, CLI action separation, catalogue changes, firmware compatibility and update sequencing. No additional firmware flash was performed for these UI/developer checks. Edge feedback/input and Intel execution are not hardware-tested.
+
+## Release and Homebrew validation (0.3.1)
+
+The stable v0.3.1 release is published with checksummed source and separate Apple Silicon and Intel/macOS 26 bottles. Both clean runner jobs passed strict online formula audit, source build, hardware-free formula tests and bottle publication. The final workflow commit also passed macOS and Linux Rust CI. Intel package execution was tested on the hosted Intel runner; Intel controller hardware remains untested.
+
+On this Apple Silicon Mac, `brew install dsmactools` poured the published bottle, installed version 0.3.1 with no Homebrew runtime dependencies, and passed direct version/help, live catalogue and USB firmware inspection checks. The colored menu was exercised in a PTY, reporting firmware 0630 and exiting cleanly with Esc. Terminal colors respect `NO_COLOR`.
+
+Local Homebrew audit/test commands were blocked by the separately installed outdated Command Line Tools, despite current full Xcode. Those checks passed on the clean release runners; system developer tools were not modified.
+
+Independent security reviews covered tracked files and Git history, the tagged source archive, tap changes, and both actual bottle archives/binaries. No credentials, personal machine paths, device captures or firmware images were found in the published artifacts. Bottle build paths and receipts refer to generic hosted runners and Homebrew staging. The local working instructions and audit reports are excluded from Git.
