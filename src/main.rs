@@ -106,8 +106,10 @@ fn run(args: Args) -> Result<()> {
     }
     let target = firmware::target_for(&info, args.pid)?;
     let image = if let Some(local) = args.fw_image {
+        println!("Checking local firmware image...");
         firmware::FirmwareImage::load(&local, &info, args.pid)?
     } else {
+        println!("Checking Sony's firmware catalogue...");
         let latest = firmware::latest(&target)?;
         println!("Latest on Sony's server: 0x{latest:04X}");
         if latest <= info.firmware_version {
@@ -120,8 +122,15 @@ fn run(args: Args) -> Result<()> {
             );
             return Ok(());
         }
+        println!("Downloading firmware from Sony...");
+        let download_started = std::time::Instant::now();
         let (image, downloaded) =
             firmware::download(&target, latest, &info, args.pid, args.cache_dir.as_deref())?;
+        println!(
+            "Download validated: {} bytes in {:.1}s.",
+            image.data.len(),
+            download_started.elapsed().as_secs_f64()
+        );
         println!("Downloaded: {}", downloaded.display());
         if args.download_latest {
             println!(
@@ -129,6 +138,7 @@ fn run(args: Args) -> Result<()> {
                 image.data.len(),
                 image.sha256
             );
+            println!("Firmware saved only; nothing has been written to the controller.");
             return Ok(());
         }
         image
@@ -146,6 +156,7 @@ fn run(args: Args) -> Result<()> {
     println!(
         "Keep the USB cable connected and the Mac awake. Writing firmware can commit before finalization."
     );
+    println!("Writing to the controller can take several minutes, even for this small file.");
     if !args.yes && !prompt_yes_no("Install this firmware?")? {
         println!("Update cancelled before writing.");
         return Ok(());
@@ -154,6 +165,9 @@ fn run(args: Args) -> Result<()> {
     let outcome = updater.flash(&image.data);
     drop(updater);
     // The old macOS HID path may change when the controller re-enumerates.
+    println!(
+        "Checking installed firmware; waiting up to 30 seconds for the controller to reconnect..."
+    );
     let verified = verify_installed(args.vid, args.pid, &info, image.version);
     match (outcome, verified) {
         (Ok(()), Ok(current)) => println!(

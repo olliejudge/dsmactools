@@ -3,7 +3,7 @@ use crate::{
     hid::DualSenseHid,
     protocol::{UpdateCommand, UpdateStatus},
 };
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::io::IsTerminal;
 use std::{
     thread,
@@ -40,17 +40,27 @@ impl<T: Transport> DualSenseUpdater<T> {
                 "Invalid image size before StartUpdate".into(),
             ));
         }
+        println!("Preparing controller for firmware installation...");
         self.dev.send(UpdateCommand::StartUpdate, &data[..256])?;
         self.wait(UpdateCommand::StartUpdate)?;
-        println!("Header accepted.");
+        println!(
+            "Writing firmware to controller over USB. Keep it connected until verification finishes."
+        );
+        let interactive_progress = std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal()
+            && std::env::var("TERM").as_deref() != Ok("dumb");
         let progress = ProgressBar::new(data.len() as u64);
+        if !interactive_progress {
+            progress.set_draw_target(ProgressDrawTarget::hidden());
+        }
         progress.set_style(
             ProgressStyle::with_template(
-                "  {bar:32.cyan/blue} {percent:>3}%  {bytes}/{total_bytes}",
+                "  {bar:24.cyan/blue} {percent:>3}%  {bytes}/{total_bytes}\n  Elapsed: {elapsed_precise} | Est. transfer remaining: {eta_precise}",
             )
             .unwrap()
             .progress_chars("━╸─"),
         );
+        let transfer_started = Instant::now();
         let transfer = (|| -> Result<()> {
             let mut sent = 0;
             for (idx, block) in data.chunks(0x8000).enumerate() {
@@ -61,11 +71,12 @@ impl<T: Transport> DualSenseUpdater<T> {
                     progress.set_position(sent as u64);
                     thread::sleep(Duration::from_millis(10));
                 }
-                if !std::io::stdout().is_terminal() {
+                if !interactive_progress {
                     println!(
-                        "Writing: {}/{} blocks",
+                        "Writing: {}/{} blocks | Elapsed: {}s",
                         idx + 1,
-                        data.len().div_ceil(0x8000)
+                        data.len().div_ceil(0x8000),
+                        transfer_started.elapsed().as_secs()
                     );
                 }
             }
@@ -78,12 +89,17 @@ impl<T: Transport> DualSenseUpdater<T> {
             return Err(error);
         }
         progress.finish_and_clear();
-        println!("Transfer complete. Verifying image...");
+        println!(
+            "USB transfer complete in {:.1}s. Verifying firmware on controller...",
+            transfer_started.elapsed().as_secs_f64()
+        );
         self.dev.send(UpdateCommand::VerifyUpdateImage, &[])?;
         self.wait(UpdateCommand::VerifyUpdateImage)?;
         println!("Image verification accepted.");
         self.dev.send(UpdateCommand::FinalizeUpdate, &[])?;
-        println!("Finalization sent; checking installed firmware.");
+        println!(
+            "Finalization sent. Keep the controller connected for the installed-version check."
+        );
         Ok(())
     }
 

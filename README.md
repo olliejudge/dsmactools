@@ -23,6 +23,8 @@ Older Homebrew versions without `brew trust` can skip that line. Already using t
 
 The app finds the matching official Sony firmware, checks compatibility and battery level, and reads back the installed version. If you're already up to date, it tells you. Firmware installation carries risk; after an error, reconnect and check the installed version before retrying.
 
+Writing firmware to the controller over USB can take several minutes, even though the download is small. The progress bar shows elapsed time and estimated transfer time remaining; keep the controller connected through the final verification.
+
 ## Test and develop
 
 | Tool | What it does |

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Clearly distinguish firmware downloads, USB writing and installed-version verification.
+- Explain that writing firmware can take several minutes, and show elapsed time and estimated transfer time remaining.
+- Keep redirected and basic-terminal progress readable without animated output.
+
 ## 0.4.0
 
 - Expand the lightbar lab with named colors, custom RGB/hex values, brightness and a smooth rainbow cycle.
