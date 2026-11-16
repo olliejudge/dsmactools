@@ -41,8 +41,31 @@ On Homebrew versions with tap trust checks, authorize this formula using `brew t
 
 For **a fresh Homebrew installation with no tap setup**, `brew install dsmactools` requires acceptance into `homebrew/core`. A release in our own tap cannot provide that globally.
 
-As reviewed on 2026-09-29, Homebrew's [package acceptance policy](https://docs.brew.sh/Package-Acceptance-Policy) normally requires repositories to be at least 30 days old and demonstrate interest beyond the author. The published GitHub thresholds are 30 forks, 30 watchers or 75 stars; an owner self-submission has higher thresholds of 90 forks, 90 watchers or 225 stars. Exceptions are discretionary. This new project should use its tap while it develops a public user base.
+As reviewed on 2026-11-16, Homebrew's [package acceptance policy](https://docs.brew.sh/Package-Acceptance-Policy) normally requires repositories to be at least 30 days old and demonstrate interest beyond the author. The published GitHub thresholds are 30 forks, 30 watchers or 75 stars; an owner self-submission has higher thresholds of 90 forks, 90 watchers or 225 stars. Exceptions are discretionary. This new project should use its tap while it develops a public user base. On that date the repository had 17 stars, 0 forks and 0 watchers, so it is not yet eligible.
 
 The [formula requirements](https://docs.brew.sh/Acceptable-Formulae) also call for a stable immutable release, checksummed sources, an acceptable open-source license, reproducible dependencies, current compiler support and successful tests on supported platforms. A separately named fork can qualify. A documented macOS restriction can be eligible; native GameController functionality explains our macOS formula restriction, while the Rust core also builds in Linux CI.
 
 When the project meets the current policy, refresh the rules, prepare a `homebrew/core` formula PR using the same stable source/checksum, include hardware-free formula tests, and work through Homebrew's review and bottle CI. Do not claim core availability before that PR is merged. Core acceptance is a maintainer decision, not a release step we can guarantee.
+
+### Preparing the core formula
+
+Core formula differences from the tap formula:
+
+- No `bottle do` block or `root_url`; BrewTestBot builds core bottles.
+- No `env :std`.
+- Same source URL and checksum, `depends_on "rust" => :build` and `depends_on :macos`.
+- Test is hardware- and network-free: argument validation errors that occur before any HID access, plus the `--interactive` terminal check.
+
+Before opening the PR, from a core checkout:
+
+```sh
+HOMEBREW_NO_INSTALL_FROM_API=1 brew install --build-from-source dsmactools
+brew test dsmactools
+brew audit --new --strict --online dsmactools
+brew style --fix --formula dsmactools
+brew lgtm --online
+```
+
+Commit message: `dsmactools X.Y.Z (new formula)`.
+
+Homebrew no longer builds new Intel bottles (Intel macOS is Tier 3, see [Support Tiers](https://docs.brew.sh/Support-Tiers)), so keep the tap's Intel bottles available after acceptance. Keep the tap formula and its test in step with core.

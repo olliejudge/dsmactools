@@ -23,7 +23,7 @@ brew install dsmactools
 dsmactools
 ```
 
-Older Homebrew versions without `brew trust` can skip that line.
+Older Homebrew versions without `brew trust` can skip that line. Already using this tap? You only need `brew install dsmactools`.
 
 ### Update
 
