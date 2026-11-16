@@ -2,6 +2,29 @@ use crate::{error::Result, hid};
 use serde_json::{Value, json};
 use std::process::Command;
 
+/// `xcrun` and `xcodebuild` are shims that open Apple's "Install Command Line Developer
+/// Tools" dialog when no developer directory is selected, so probe `xcode-select -p` first.
+fn developer_tools_installed(exit_success: bool, stdout: &[u8]) -> bool {
+    exit_success && !String::from_utf8_lossy(stdout).trim().is_empty()
+}
+
+fn developer_tools() -> (Value, Value, Value, Value) {
+    let selected = Command::new("/usr/bin/xcode-select").arg("-p").output();
+    let installed = selected
+        .as_ref()
+        .is_ok_and(|out| developer_tools_installed(out.status.success(), &out.stdout));
+    if !installed {
+        let missing = json!({"available":false,"reason":"Developer tools are not installed"});
+        return (missing.clone(), missing.clone(), missing.clone(), missing);
+    }
+    (
+        command("/usr/bin/xcode-select", &["-p"]),
+        command("/usr/bin/xcodebuild", &["-version"]),
+        command("/usr/bin/xcrun", &["swift", "--version"]),
+        command("/usr/bin/xcrun", &["--find", "metal"]),
+    )
+}
+
 fn command(program: &str, args: &[&str]) -> Value {
     match Command::new(program).args(args).output() {
         Ok(out) => {
@@ -62,10 +85,27 @@ pub fn run() -> Result<()> {
         .iter()
         .map(|d| json!({"name":d.name,"pid":format!("{:04x}",d.pid),"transport":"USB"}))
         .collect();
+    let (developer_directory, xcode, swift, metal_compiler) = developer_tools();
     let report = json!({"schema":1,"tool_version":env!("CARGO_PKG_VERSION"),"os":std::env::consts::OS,"architecture":std::env::consts::ARCH,
-        "macos":command("sw_vers",&["-productVersion"]),"developer_directory":command("xcode-select",&["-p"]),
-        "xcode":command("xcodebuild",&["-version"]),"swift":command("xcrun",&["swift","--version"]),
-        "metal_compiler":command("xcrun",&["--find","metal"]),"usb_controllers":usb,"game_controller":native_controllers()});
+        "macos":command("sw_vers",&["-productVersion"]),"developer_directory":developer_directory,
+        "xcode":xcode,"swift":swift,"metal_compiler":metal_compiler,"usb_controllers":usb,"game_controller":native_controllers()});
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn developer_tools_need_a_successful_non_empty_selection() {
+        assert!(developer_tools_installed(
+            true,
+            b"/Applications/Xcode.app/Contents/Developer\n"
+        ));
+        assert!(!developer_tools_installed(true, b" \n"));
+        assert!(!developer_tools_installed(
+            false,
+            b"/Library/Developer/CommandLineTools"
+        ));
+    }
 }

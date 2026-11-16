@@ -19,7 +19,45 @@ struct Status {
     controller: Controller,
     info: FirmwareInfo,
     battery: Option<u8>,
+    /// Sony's image series for this controller; `None` when it is not supported for updates.
+    target: Option<String>,
     latest: std::result::Result<u16, String>,
+}
+
+fn unsupported_message(series: u16) -> String {
+    format!("This controller's firmware series 0x{series:04X} isn't supported for updates.")
+}
+
+enum Resolution {
+    Use(Controller),
+    Choose,
+    NoController,
+}
+
+/// Pick the controller after a refresh. A pinned `--path` is used while it still exists; once
+/// it is gone (a firmware update re-enumerates the controller) normal discovery applies.
+fn resolve_controller(
+    devices: &[Controller],
+    pinned: Option<(&str, u16)>,
+    previous: Option<&Controller>,
+) -> Resolution {
+    if let Some((path, pid)) = pinned
+        && let Some(device) = devices.iter().find(|d| d.path == path && d.pid == pid)
+    {
+        return Resolution::Use(device.clone());
+    }
+    if let Some(old) = previous
+        && let Some(device) = devices.iter().find(|d| d.path == old.path)
+    {
+        return Resolution::Use(device.clone());
+    }
+    match devices {
+        [] => Resolution::NoController,
+        [only] => Resolution::Use(only.clone()),
+        // A previously selected controller that vanished among several needs an explicit refresh.
+        _ if previous.is_some() => Resolution::NoController,
+        _ => Resolution::Choose,
+    }
 }
 
 fn loading(message: &str) -> ProgressBar {
@@ -36,12 +74,16 @@ fn read_status(controller: Controller) -> Result<Status> {
         let dev = DualSenseHid::open(0x054c, controller.pid, &controller.path)?;
         let info = dev.get_firmware_info()?;
         let battery = dev.battery().ok();
-        let target = firmware::target_for(&info, controller.pid)?;
-        let latest = firmware::latest(&target).map_err(|e| e.to_string());
+        let target = firmware::target_for(&info, controller.pid).ok();
+        let latest = match &target {
+            Some(target) => firmware::latest(target).map_err(|e| e.to_string()),
+            None => Err(unsupported_message(info.software_series)),
+        };
         Ok(Status {
             controller,
             info,
             battery,
+            target,
             latest,
         })
     })();
@@ -104,6 +146,15 @@ fn dashboard(term: &Term, status: Option<&Status>, error: Option<&str>) -> Resul
                 "     {}  ·  Firmware {:04X}",
                 style("Up to date").green(),
                 s.info.firmware_version
+            ))?,
+            Err(_) if s.target.is_none() => term.write_line(&format!(
+                "     Firmware {:04X}  ·  {}",
+                s.info.firmware_version,
+                style(format!(
+                    "Series 0x{:04X} not supported for updates",
+                    s.info.software_series
+                ))
+                .yellow()
             ))?,
             Err(_) => term.write_line(&format!(
                 "     Firmware {:04X}  ·  {}",
@@ -405,27 +456,20 @@ pub fn run(mut args: Args) -> Result<()> {
             heading(&term)?;
             match hid::controllers() {
                 Ok(devices) => {
-                    // Refresh the ephemeral HID path after a controller reboot.
-                    selected = if !args.path.is_empty() {
-                        devices
+                    // Refresh the ephemeral HID path after a controller reboot. A --path that
+                    // no longer exists is dropped so discovery can find the re-enumerated device.
+                    if !args.path.is_empty()
+                        && !devices
                             .iter()
-                            .find(|d| d.path == args.path && d.pid == args.pid)
-                            .cloned()
-                    } else if let Some(old) = selected.as_ref() {
-                        let old: &Controller = old;
-                        devices
-                            .iter()
-                            .find(|d| d.path == old.path)
-                            .cloned()
-                            .or_else(|| {
-                                if devices.len() == 1 {
-                                    Some(devices[0].clone())
-                                } else {
-                                    None
-                                }
-                            })
-                    } else {
-                        select_controller(&term, &devices)?
+                            .any(|d| d.path == args.path && d.pid == args.pid)
+                    {
+                        args.path.clear();
+                    }
+                    let pinned = (!args.path.is_empty()).then_some((args.path.as_str(), args.pid));
+                    selected = match resolve_controller(&devices, pinned, selected.as_ref()) {
+                        Resolution::Use(device) => Some(device),
+                        Resolution::Choose => select_controller(&term, &devices)?,
+                        Resolution::NoController => None,
                     };
                     match selected.clone().map(read_status).transpose() {
                         Ok(value) => {
@@ -550,6 +594,14 @@ pub fn run(mut args: Args) -> Result<()> {
                         else {
                             continue;
                         };
+                        if firmware_action != 1 && s.target.is_none() {
+                            term.write_line(&format!(
+                                "  {}",
+                                style(unsupported_message(s.info.software_series)).yellow()
+                            ))?;
+                            pause(&term)?;
+                            continue;
+                        }
                         action.check = firmware_action == 0;
                         action.print_firmware_info = firmware_action == 1;
                         action.download_latest = firmware_action == 2;
@@ -573,4 +625,67 @@ pub fn run(mut args: Args) -> Result<()> {
 ",
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn controller(path: &str) -> Controller {
+        Controller {
+            path: path.into(),
+            pid: 0x0ce6,
+            name: "DualSense".into(),
+        }
+    }
+
+    #[test]
+    fn unsupported_series_message_names_the_series() {
+        assert_eq!(
+            unsupported_message(0x9999),
+            "This controller's firmware series 0x9999 isn't supported for updates."
+        );
+    }
+
+    #[test]
+    fn pinned_path_is_used_while_present_then_discovery_takes_over() {
+        let devices = [controller("a"), controller("b")];
+        let pinned = Some(("b", 0x0ce6));
+        assert!(matches!(
+            resolve_controller(&devices, pinned, Some(&devices[0])),
+            Resolution::Use(d) if d.path == "b"
+        ));
+        // Wrong PID does not match the pin.
+        assert!(matches!(
+            resolve_controller(&devices, Some(("b", 0x0df2)), None),
+            Resolution::Choose
+        ));
+        // After re-enumeration the pinned path is gone; the single new device is found.
+        let renumbered = [controller("c")];
+        assert!(matches!(
+            resolve_controller(&renumbered, pinned, Some(&devices[1])),
+            Resolution::Use(d) if d.path == "c"
+        ));
+    }
+
+    #[test]
+    fn discovery_prefers_previous_path_and_only_prompts_without_one() {
+        let devices = [controller("a"), controller("b")];
+        assert!(matches!(
+            resolve_controller(&devices, None, Some(&controller("b"))),
+            Resolution::Use(d) if d.path == "b"
+        ));
+        assert!(matches!(
+            resolve_controller(&devices, None, Some(&controller("gone"))),
+            Resolution::NoController
+        ));
+        assert!(matches!(
+            resolve_controller(&devices, None, None),
+            Resolution::Choose
+        ));
+        assert!(matches!(
+            resolve_controller(&[], None, None),
+            Resolution::NoController
+        ));
+    }
 }

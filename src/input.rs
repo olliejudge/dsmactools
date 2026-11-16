@@ -11,8 +11,12 @@ use crossterm::{
 use serde_json::{Value, json};
 use std::{
     fs::OpenOptions,
-    io::{IsTerminal, Write},
+    io::{BufWriter, IsTerminal, Write},
     path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -50,32 +54,55 @@ pub fn decode(raw: &[u8]) -> Result<Value> {
     )
 }
 
+/// Process-wide signal state, installed once on first use.
+///
+/// signal-hook cannot restore a signal's default disposition once a handler is installed, so
+/// handlers are registered a single time and made conditional instead. While no `Cancellation`
+/// exists, `idle` is true and a `conditional_default` action emulates the default behaviour
+/// (terminate), so Ctrl-C and SIGTERM work normally between monitor/record/feedback runs.
+/// While one exists, `idle` is false and the signal only sets `requested`.
+struct SignalState {
+    requested: Arc<AtomicBool>,
+    idle: Arc<AtomicBool>,
+}
+static SIGNALS: Mutex<Option<SignalState>> = Mutex::new(None);
+
 /// Catch process cancellation so timed effects can reset and captures can flush.
 pub struct Cancellation {
-    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    registrations: Vec<signal_hook::SigId>,
+    requested: Arc<AtomicBool>,
+    idle: Arc<AtomicBool>,
 }
 impl Cancellation {
     pub fn new() -> Result<Self> {
-        let mut this = Self {
-            flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            registrations: Vec::new(),
-        };
-        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-            this.registrations
-                .push(signal_hook::flag::register(signal, this.flag.clone())?);
+        let mut state = SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
+        if state.is_none() {
+            let requested = Arc::new(AtomicBool::new(false));
+            let idle = Arc::new(AtomicBool::new(true));
+            let signals = [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+            // Actions run in registration order: the conditional default must come first.
+            for signal in signals {
+                signal_hook::flag::register_conditional_default(signal, idle.clone())?;
+            }
+            for signal in signals {
+                signal_hook::flag::register(signal, requested.clone())?;
+            }
+            *state = Some(SignalState { requested, idle });
         }
-        Ok(this)
+        let state = state.as_ref().unwrap();
+        state.requested.store(false, Ordering::SeqCst);
+        state.idle.store(false, Ordering::SeqCst);
+        Ok(Self {
+            requested: state.requested.clone(),
+            idle: state.idle.clone(),
+        })
     }
     pub fn requested(&self) -> bool {
-        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+        self.requested.load(Ordering::Relaxed)
     }
 }
 impl Drop for Cancellation {
     fn drop(&mut self) {
-        for id in self.registrations.drain(..) {
-            signal_hook::low_level::unregister(id);
-        }
+        self.idle.store(true, Ordering::SeqCst);
     }
 }
 
@@ -170,7 +197,7 @@ pub fn record(dev: &DualSenseHid, path: &Path, seconds: u64, pid: u16) -> Result
         ));
     }
     let cancellation = Cancellation::new()?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut file = BufWriter::new(OpenOptions::new().write(true).create_new(true).open(path)?);
     writeln!(
         file,
         "{}",
@@ -238,9 +265,10 @@ pub fn record(dev: &DualSenseHid, path: &Path, seconds: u64, pid: u16) -> Result
         Ok(())
     })();
     let summary = json!({"kind":"summary","samples":count,"elapsed_seconds":start.elapsed().as_secs_f64(),"reports_per_second":count as f64 / start.elapsed().as_secs_f64(),"arrival_interval_us": if count>1 {json!({"min":min,"mean":sum as f64/(count-1) as f64,"max":max})} else {Value::Null},"axis_min":axis_min,"axis_max":axis_max,"buttons_seen":buttons,"complete":outcome.is_ok(),"cancelled":cancelled});
-    writeln!(file, "{summary}")?;
-    file.flush()?;
+    // Flush on every path (complete, cancelled or failed) before reporting, so the capture is on disk.
+    let saved = writeln!(file, "{summary}").and_then(|()| file.flush());
     drop(guard);
+    saved?;
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
     outcome?;
     if count == 0 {
@@ -274,5 +302,39 @@ mod tests {
         assert!(decode(&raw[..63]).is_err());
         raw[0] = 0x31;
         assert!(decode(&raw).is_err());
+    }
+
+    #[test]
+    fn cancellation_records_a_signal_while_active() {
+        let cancellation = Cancellation::new().unwrap();
+        assert!(!cancellation.requested());
+        signal_hook::low_level::raise(signal_hook::consts::SIGINT).unwrap();
+        assert!(cancellation.requested());
+        drop(cancellation);
+        // A new run starts clean.
+        assert!(!Cancellation::new().unwrap().requested());
+    }
+
+    // Re-run this binary: the child uses and drops a Cancellation, then must die from SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn signals_terminate_the_process_again_after_cancellation_is_dropped() {
+        use std::os::unix::process::ExitStatusExt;
+        if std::env::var_os("DSMAC_SIGNAL_CHILD").is_some() {
+            drop(Cancellation::new().unwrap());
+            signal_hook::low_level::raise(signal_hook::consts::SIGTERM).unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            std::process::exit(0);
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "input::tests::signals_terminate_the_process_again_after_cancellation_is_dropped",
+                "--test-threads=1",
+            ])
+            .env("DSMAC_SIGNAL_CHILD", "1")
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(signal_hook::consts::SIGTERM));
     }
 }

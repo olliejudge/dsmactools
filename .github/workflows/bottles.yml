@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 jobs:
-  bottle:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     env:
       RELEASE_VERSION: ${{ inputs.version }}
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # stable
         with:
           toolchain: 1.98.1
       - name: Build and test the published formula
@@ -53,29 +53,61 @@ jobs:
           mkdir bottle-output
           cd bottle-output
           brew bottle --json --no-rebuild --root-url "https://github.com/olliejudge/dsmactools/releases/download/v$RELEASE_VERSION" olliejudge/tap/dsmactools
-      - name: Publish bottle and checksum metadata
+          # Homebrew's local filename uses --; its download URL uses -.
+          for file in ./dsmactools--*.bottle.tar.gz; do
+            mv "$file" "${file/--/-}"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bottle-${{ matrix.os }}
+          path: |
+            bottle-output/dsmactools-*.bottle.tar.gz
+            bottle-output/dsmactools--*.bottle.json
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Validate stable version
+        shell: bash
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bottle-*
+          merge-multiple: true
+          path: bottle-output
+      - name: Publish bottles and checksum metadata
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         working-directory: bottle-output
         run: |
           gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null
-          # Homebrew's local filename uses --; its download URL uses -.
-          for file in ./dsmactools--*.bottle.tar.gz; do
-            mv "$file" "${file/--/-}"
-          done
-          archives=(./dsmactools-*.bottle.tar.gz)
-          metadata=(./dsmactools--*.bottle.json)
-          archive_name="${archives[0]##*/}"
-          metadata_name="${metadata[0]##*/}"
           gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > existing-assets.txt
-          archive_exists=$(ruby -e 'puts File.readlines(ARGV[0], chomp: true).include?(ARGV[1])' existing-assets.txt "$archive_name")
-          metadata_exists=$(ruby -e 'puts File.readlines(ARGV[0], chomp: true).include?(ARGV[1])' existing-assets.txt "$metadata_name")
-          if [ "$archive_exists" = true ] && [ "$metadata_exists" = true ]; then
-            echo "Retaining the previously published immutable bottle and metadata."
-          elif [ "$archive_exists" = true ] || [ "$metadata_exists" = true ]; then
-            echo "Incomplete existing bottle pair; review it before retrying."
-            exit 1
-          else
-            gh release upload "v$RELEASE_VERSION" "${archives[0]}" "${metadata[0]}" --repo "$GITHUB_REPOSITORY"
-          fi
+          archives=(./dsmactools-*.bottle.tar.gz)
+          test -e "${archives[0]}"
+          test "${#archives[@]}" -eq 4
+          for archive in "${archives[@]}"; do
+            archive_name="${archive##*/}"
+            # Metadata keeps Homebrew's local -- spelling.
+            metadata_name="${archive_name/dsmactools-/dsmactools--}"
+            metadata_name="${metadata_name%.tar.gz}.json"
+            test -f "./$metadata_name"
+            archive_exists=$(ruby -e 'puts File.readlines(ARGV[0], chomp: true).include?(ARGV[1])' existing-assets.txt "$archive_name")
+            metadata_exists=$(ruby -e 'puts File.readlines(ARGV[0], chomp: true).include?(ARGV[1])' existing-assets.txt "$metadata_name")
+            if [ "$archive_exists" = true ] && [ "$metadata_exists" = true ]; then
+              echo "Retaining the previously published immutable bottle and metadata: $archive_name"
+            elif [ "$archive_exists" = true ] || [ "$metadata_exists" = true ]; then
+              echo "Incomplete existing bottle pair for $archive_name; review it before retrying."
+              exit 1
+            else
+              gh release upload "v$RELEASE_VERSION" "./$archive_name" "./$metadata_name" --repo "$GITHUB_REPOSITORY"
+            fi
+          done

@@ -40,21 +40,26 @@ fn main() {
     }
 }
 
+/// Describe the connected controller. An unsupported series is reported, not rejected, so
+/// details stay available; update commands still validate the target themselves.
+fn info_json(info: &FirmwareInfo, path: &str, pid: u16, target: Option<&str>) -> serde_json::Value {
+    serde_json::json!({"path":path,"pid":pid,"target":target,
+        "version":info.firmware_version,"version_hex":format!("0x{:04X}",info.firmware_version),
+        "build_date":info.build_date,"build_time":info.build_time,
+        "firmware_type":info.firmware_type,"image_type":info.image_type,"hardware_info":info.hardware_info,"software_series":info.software_series})
+}
+
 fn print_info(info: &FirmwareInfo, path: &str, pid: u16, json: bool) -> Result<()> {
-    let target = firmware::target_for(info, pid)?;
+    let target = firmware::target_for(info, pid).ok();
     if json {
-        println!(
-            "{}",
-            serde_json::json!({"path":path,"pid":pid,"target":target,
-            "version":info.firmware_version,"version_hex":format!("0x{:04X}",info.firmware_version),
-            "build_date":info.build_date,"build_time":info.build_time,
-            "firmware_type":info.firmware_type,"image_type":info.image_type,"hardware_info":info.hardware_info,"software_series":info.software_series})
-        );
+        println!("{}", info_json(info, path, pid, target.as_deref()));
     } else {
         println!("Controller: {path} (USB, 054c:{pid:04x})");
         println!(
-            "Firmware: 0x{:04X} | Sony target: {target}",
-            info.firmware_version
+            "Firmware: 0x{:04X} | Sony target: {}",
+            info.firmware_version,
+            target
+                .unwrap_or_else(|| format!("unsupported (series 0x{:04X})", info.software_series))
         );
         println!(
             "Built: {} {} | Hardware: 0x{:08X}",
@@ -227,4 +232,39 @@ fn prompt_yes_no(prompt: &str) -> Result<bool> {
         input.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(series: u16) -> FirmwareInfo {
+        let mut r = vec![0; 64];
+        r[0] = 0x20;
+        r[20] = 2;
+        r[22..24].copy_from_slice(&series.to_le_bytes());
+        r[44..46].copy_from_slice(&0x0630u16.to_le_bytes());
+        FirmwareInfo::parse(r).unwrap()
+    }
+
+    #[test]
+    fn info_json_keeps_its_keys_and_nulls_only_an_unsupported_target() {
+        let supported = info_json(&info(0x000b), "p", 0x0ce6, Some("000B"));
+        let unsupported = info_json(&info(0x9999), "p", 0x0ce6, None);
+        assert_eq!(supported["target"], "000B");
+        assert!(unsupported["target"].is_null());
+        assert_eq!(unsupported["software_series"], 0x9999);
+        assert_eq!(unsupported["version_hex"], "0x0630");
+        let keys =
+            |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&supported), keys(&unsupported));
+    }
+
+    #[test]
+    fn print_info_accepts_unsupported_series() {
+        let info = info(0x9999);
+        assert!(firmware::target_for(&info, 0x0ce6).is_err());
+        print_info(&info, "p", 0x0ce6, false).unwrap();
+        print_info(&info, "p", 0x0ce6, true).unwrap();
+    }
 }

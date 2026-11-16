@@ -6,7 +6,6 @@ rust-version = "1.88"
 license = "MIT"
 description = "A DualSense workbench for Mac game developers"
 repository = "https://github.com/olliejudge/dsmactools"
-homepage = "https://github.com/olliejudge/dsmactools"
 
 [[bin]]
 name = "dsmactools"
@@ -16,7 +15,7 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 hidapi = "2.6"
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false }
 thiserror = "2"
 serde_json = "1"
 sha2 = "0.10"
@@ -31,3 +30,8 @@ signal-hook = "0.3"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSDictionary", "NSString", "NSRunLoop", "NSDate", "NSObject"] }
 objc2-game-controller = { version = "0.3", default-features = false, features = ["std", "GCController", "GCDevice", "GCDeviceBattery", "GCDeviceHaptics", "GCDeviceLight", "GCMotion", "GCPhysicalInputProfile", "GCExtendedGamepad", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerElement"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

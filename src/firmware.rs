@@ -35,6 +35,11 @@ pub fn parse_catalogue(data: &[u8], target: &str) -> Result<u16> {
         .get(&key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| invalid(format!("Sony catalogue is missing {key}")))?;
+    parse_version(version)
+}
+
+/// Parse a catalogue version, which must be exactly `0x` followed by four hex digits.
+fn parse_version(version: &str) -> Result<u16> {
     let hex = version
         .strip_prefix("0x")
         .filter(|s| s.len() == 4 && s.bytes().all(|c| c.is_ascii_hexdigit()))
@@ -86,13 +91,14 @@ pub fn catalogue_report(data: &[u8]) -> Result<serde_json::Value> {
         .ok_or_else(|| invalid("Empty or malformed Sony catalogue"))?;
     for (key, value) in current {
         if key.starts_with("FwUpdate") {
-            let target = key
-                .strip_prefix("FwUpdate")
+            key.strip_prefix("FwUpdate")
                 .and_then(|k| k.strip_suffix("LatestVersion"))
-                .filter(|t| t.len() == 4 && t.bytes().all(|b| b.is_ascii_hexdigit()));
-            let target = target
+                .filter(|t| t.len() == 4 && t.bytes().all(|b| b.is_ascii_hexdigit()))
                 .ok_or_else(|| invalid(format!("Unexpected firmware catalogue key: {key}")))?;
-            parse_catalogue(data, target)?;
+            let version = value
+                .as_str()
+                .ok_or_else(|| invalid(format!("Sony catalogue is missing {key}")))?;
+            parse_version(version)?;
         }
         if !value.is_string() {
             return Err(invalid(format!("Invalid catalogue value for {key}")));
@@ -278,6 +284,17 @@ mod tests {
         }
     }
     #[test]
+    fn version_parser_requires_prefix_four_hex_digits_and_no_extras() {
+        assert_eq!(parse_version("0x0630").unwrap(), 0x630);
+        assert_eq!(parse_version("0xFfFf").unwrap(), 0xffff);
+        for bad in [
+            "", "0x", "0630", "0X0630", "0x630", "0x00630", "0x063g", "0x+630", " 0x0630",
+            "0x0630 ",
+        ] {
+            assert!(parse_version(bad).is_err(), "{bad:?}");
+        }
+    }
+    #[test]
     fn checks_size_pid_series_catalogue_and_upgrade() {
         assert!(FirmwareImage::validate(image(), &info(), 0x0ce6, Some(0x630)).is_ok());
         for offset in [0, 0x62, 0x74] {
@@ -329,6 +346,7 @@ mod tests {
             b"{}".as_slice(),
             b"[]",
             br#"{"FwUpdate000BLatestVersion":"garbage"}"#,
+            br#"{"FwUpdate000BLatestVersion":1537}"#,
             br#"{"FwUpdate../../LatestVersion":"0x0701"}"#,
         ] {
             assert!(catalogue_report(data).is_err());
