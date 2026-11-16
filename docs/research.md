@@ -71,7 +71,7 @@ On the same standard Type 000B controller with firmware 0630:
 - macOS 27.0, arm64, Xcode 27.1 beta, Swift 6.4 and the Metal compiler were detected. Missing tools remain explicit availability failures rather than being installed by the app.
 - Concurrent HID clients can cause exclusive-access errors. Tests were then run sequentially. Users should close other controller tools.
 
-The 16 Rust tests cover malformed reports, button/touch/signed-motion decoding, output report flags/effect reset, CLI action separation, catalogue changes, firmware compatibility and update sequencing. No additional firmware flash was performed for these UI/developer checks. Edge feedback/input and Intel execution are not hardware-tested.
+The 16 Rust tests cover malformed reports, button/touch/signed-motion decoding, output report flags/effect reset, CLI action separation, catalogue changes, firmware compatibility and update sequencing. No additional firmware flash was performed for these UI/developer checks. Edge feedback/input and Intel execution are not hardware-tested. A third-party community report in November 2026 described a successful firmware update on an Intel Mac using a Cargo source install; the maintainer has not independently verified it.
 
 ## Release and Homebrew validation (0.3.1)
 

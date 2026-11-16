@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, macos-26-intel]
+        os: [macos-15, macos-26, macos-15-intel, macos-26-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -27,7 +27,6 @@ jobs:
         run: |
           [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.os == 'macos-26-intel'
         with:
           toolchain: 1.98.1
       - name: Build and test the published formula
@@ -41,18 +40,15 @@ jobs:
           formula_version=$(brew info --json=v2 olliejudge/tap/dsmactools | ruby -rjson -e 'puts JSON.parse(STDIN.read)["formulae"][0]["versions"]["stable"]')
           test "$formula_version" = "$RELEASE_VERSION"
           brew audit --strict --online olliejudge/tap/dsmactools
-          if [ "$(uname -m)" = x86_64 ]; then
-            # Homebrew no longer publishes Intel Rust dependency bottles.
-            # Use the pinned compiler above; this app has no runtime dependencies.
-            # Homebrew isolates HOME, so use real binaries rather than rustup proxies.
-            toolchain_bin=$(dirname "$(rustup which --toolchain 1.98.1 cargo)")
-            export PATH="$toolchain_bin:$PATH"
-            cargo --version
-            rustc --version
-            brew install --build-bottle --ignore-dependencies olliejudge/tap/dsmactools
-          else
-            brew install --build-bottle olliejudge/tap/dsmactools
-          fi
+          # Homebrew publishes Rust bottles only for its newest platform, so a
+          # dependency install would compile Rust from source. Use the pinned
+          # compiler above; this app has no runtime dependencies.
+          # Homebrew isolates HOME, so use real binaries rather than rustup proxies.
+          toolchain_bin=$(dirname "$(rustup which --toolchain 1.98.1 cargo)")
+          export PATH="$toolchain_bin:$PATH"
+          cargo --version
+          rustc --version
+          brew install --build-bottle --ignore-dependencies olliejudge/tap/dsmactools
           brew test olliejudge/tap/dsmactools
           mkdir bottle-output
           cd bottle-output

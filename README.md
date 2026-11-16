@@ -6,6 +6,8 @@ Plug in your controller, open the app, and use the keyboard menu. No coding know
 
 ## Install
 
+You'll need [Homebrew](https://brew.sh), a USB data cable, and a Mac running macOS 15 Sequoia or later (Apple Silicon or Intel). Older Macs can use the [install guide](docs/install.md).
+
 ```sh
 brew tap olliejudge/tap
 brew trust --formula olliejudge/tap/dsmactools
@@ -14,6 +16,8 @@ dsmactools
 ```
 
 Older Homebrew versions without `brew trust` can skip that line. Already using this tap? You only need `brew install dsmactools`.
+
+If Homebrew says it is installing or building `rust`, your Mac doesn't have a ready-made package and the build can take hours. Press Control-C and follow the [install guide](docs/install.md) instead.
 
 ## Update your controller
 
@@ -57,11 +61,20 @@ Capture timing measures host report arrival, not game latency. [Capture format](
 
 Standard DualSense USB operation is hardware-tested, including a Type `000B` firmware update from `0580` to `0630`. Edge is detected but not hardware-tested. Direct input, feedback and firmware tools require USB; native macOS diagnostics can also see other supported controllers and Bluetooth devices.
 
-Apple Silicon is hardware-tested. Firmware downloads are cached locally and are not bundled with the app. Sony's official [PlayStation Accessories](https://controller.dl.playstation.net/controller/lang/en/2100004.html) updater is available for Windows.
+Apple Silicon is hardware-tested. Intel Macs are supported, but controller updates on Intel have not yet been tested by the maintainer. Firmware downloads are saved in `~/Library/Caches/ds-mac-tools` and are not bundled with the app. Sony's official [PlayStation Accessories](https://controller.dl.playstation.net/controller/lang/en/2100004.html) updater is available for Windows.
 
 To update DS Mac Tools itself: `brew update && brew upgrade dsmactools`.
 
-[Build and protocol notes](docs/research.md) · [Release and Homebrew guide](docs/releasing.md)
+[Install guide](docs/install.md) · [Build and protocol notes](docs/research.md) · [Release and Homebrew guide](docs/releasing.md)
+
+## Uninstall
+
+```sh
+brew uninstall dsmactools
+rm -rf ~/Library/Caches/ds-mac-tools
+```
+
+The second line removes downloaded firmware. You can also run `brew untap olliejudge/tap` if you don't use anything else from the tap. Installed another way? See the [install guide](docs/install.md#install-with-rust-instead).
 
 ## Credits
 

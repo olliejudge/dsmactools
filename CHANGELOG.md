@@ -5,6 +5,8 @@
 - Clearly distinguish firmware downloads, USB writing and installed-version verification.
 - Explain that writing firmware can take several minutes, and show elapsed time and estimated transfer time remaining.
 - Keep redirected and basic-terminal progress readable without animated output.
+- Provide prebuilt Homebrew packages for macOS 15 Sequoia or later on both Apple Silicon and Intel, so these Macs no longer need to build Rust from source.
+- Add an install guide covering Homebrew, an alternative install with Rust's official installer, uninstalling and removing downloaded firmware.
 
 ## 0.4.0
 
