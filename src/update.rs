@@ -6,17 +6,21 @@
 //! closes the handle, and verifies the installed version on a new handle. Nothing here retries
 //! or reflashes after an error.
 
+// An install must never panic on output: after the terminal window closes, writes fail and
+// `println!` would unwind in the middle of the sequence. Use `say!` and `alert!` instead.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
 use crate::{
     error::{AppError, Result},
     firmware::{ControllerIdentity, FIRMWARE_SIZE, FirmwareImage},
     hid::{self, Controller, DualSenseHid},
-    input::Cancellation,
+    input::{Cancellation, StopSignal},
     protocol::{self, FirmwareInfo, UpdateCommand},
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::{
     cell::Cell,
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -41,6 +45,26 @@ const VERIFY_POLL: Duration = Duration::from_millis(500);
 /// Rough time per write packet, used only for the stop warning before the transfer has a
 /// measured rate: the 10 ms pacing delay plus an assumed 10 ms of USB round trips.
 const ESTIMATED_PACKET_TIME: Duration = Duration::from_millis(20);
+
+// Unit tests discard install output, which `println!` capture used to hide.
+#[cfg(test)]
+use std::io::{sink as error_stream, sink as output_stream};
+#[cfg(not(test))]
+use std::io::{stderr as error_stream, stdout as output_stream};
+
+/// Print a line to stdout, ignoring write errors (a closed terminal or pipe).
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(output_stream(), $($arg)*);
+    }};
+}
+
+/// Print a line to stderr, ignoring write errors (a closed terminal or pipe).
+macro_rules! alert {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(error_stream(), $($arg)*);
+    }};
+}
 
 /// Proof of being inside this module. Its field is private, so only this module can create one,
 /// and the HID layer requires it for firmware-update feature reports.
@@ -74,11 +98,20 @@ impl InstallOutcome {
     }
 }
 
+/// The result of [`install`], and the stop request (if any) held back while it ran.
+#[derive(Debug)]
+pub struct Installation {
+    pub result: Result<InstallOutcome>,
+    /// Set when Ctrl-C, SIGTERM or SIGHUP arrived during the install. The install still ran to
+    /// its end; the caller reports `result` and then exits instead of carrying on.
+    pub stop_requested: Option<StopSignal>,
+}
+
 /// Install a validated image on the open controller at `path`.
 ///
 /// The caller's confirmation may have taken any amount of time, so the controller is read again
 /// here before anything is written. Errors before the first write mean nothing was written.
-pub fn install(dev: DualSenseHid, path: &str, image: &FirmwareImage) -> Result<InstallOutcome> {
+pub fn install(dev: DualSenseHid, path: &str, image: &FirmwareImage) -> Installation {
     install_with(dev, path, image, &SystemHost)
 }
 
@@ -93,6 +126,21 @@ fn install_with<D: Device, H: Host>(
     path: &str,
     image: &FirmwareImage,
     host: &H,
+) -> Installation {
+    let mut stop_requested = None;
+    let result = run_install(dev, path, image, host, &mut stop_requested);
+    Installation {
+        result,
+        stop_requested,
+    }
+}
+
+fn run_install<D: Device, H: Host>(
+    dev: D,
+    path: &str,
+    image: &FirmwareImage,
+    host: &H,
+    stop_requested: &mut Option<StopSignal>,
 ) -> Result<InstallOutcome> {
     let _awake = host.keep_awake();
     let validated = image.validated_for();
@@ -106,10 +154,11 @@ fn install_with<D: Device, H: Host>(
     let flashed =
         DualSenseUpdater::new(dev, host, &signals, host.interactive_progress()).flash(image);
     // The controller may re-enumerate with a new HID path; the old handle is closed.
-    println!(
+    say!(
         "Checking installed firmware; waiting up to 30 seconds for the controller to reconnect..."
     );
     let verified = verify_installed(host, &signals, &validated, image.version());
+    *stop_requested = signals.stop_signal();
     conclude(flashed, verified)
 }
 
@@ -171,8 +220,8 @@ fn verify_installed<H: Host>(
     let deadline = host.now() + VERIFY_TIMEOUT;
     loop {
         host.sleep(VERIFY_POLL);
-        if let Some(warning) = signals.warning(deadline.saturating_duration_since(host.now())) {
-            eprintln!("{warning}");
+        if let Some(warning) = signals.warning(Stage::Checking) {
+            alert!("{warning}");
         }
         if let Ok(devices) = host.controllers()
             && let Some(controller) = sole_controller(&devices, expected.pid)
@@ -320,7 +369,7 @@ trait Host: Pacer {
     fn controllers(&self) -> Result<Vec<Controller>>;
     /// Open a new handle to `controller` and read its firmware information.
     fn read_new_handle(&self, controller: &Controller) -> Result<FirmwareInfo>;
-    /// Defer SIGINT/SIGTERM until the returned value is dropped.
+    /// Defer SIGINT/SIGTERM/SIGHUP until the returned value is dropped.
     fn defer_signals(&self) -> Result<SignalDeferral>;
     /// Keep the Mac from idle-sleeping until the returned value is dropped.
     fn keep_awake(&self) -> KeepAwake;
@@ -359,39 +408,63 @@ impl Host for SystemHost {
     }
 }
 
-/// Holds Ctrl-C and SIGTERM while firmware is written, so they cannot stop the process in the
-/// middle of a transfer. The first request produces one warning and the update carries on;
-/// it is never aborted. Dropping this restores default signal behaviour.
+/// Holds Ctrl-C, SIGTERM and SIGHUP (the terminal window closing) while firmware is written and
+/// checked, so they cannot stop the process in the middle of an install. The first request
+/// produces one warning and the update carries on; it is never aborted. Dropping this restores
+/// default signal behaviour.
 struct SignalDeferral {
-    requested: Box<dyn Fn() -> bool>,
-    warned: Cell<bool>,
+    requested: Box<dyn Fn() -> Option<StopSignal>>,
+    warned: Cell<Option<Stage>>,
+}
+
+/// Where an install is when a stop is requested.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stage {
+    /// The update sequence is running; `remaining` estimates the time to the end of the check.
+    Writing { remaining: Duration },
+    /// The installed-version check on a new handle.
+    Checking,
 }
 
 impl SignalDeferral {
     /// Use the process-wide registration shared with monitor, record and feedback.
     fn process() -> Result<Self> {
-        let cancellation = Cancellation::new()?;
-        Ok(Self::new(move || cancellation.requested()))
+        let cancellation = Cancellation::including_hangup()?;
+        Ok(Self::with_signal(move || cancellation.stop_signal()))
     }
 
+    /// A deferral whose stop request, once true, counts as Ctrl-C.
+    #[cfg(test)]
     fn new(requested: impl Fn() -> bool + 'static) -> Self {
+        Self::with_signal(move || requested().then_some(StopSignal::Interrupt))
+    }
+
+    fn with_signal(requested: impl Fn() -> Option<StopSignal> + 'static) -> Self {
         Self {
             requested: Box::new(requested),
-            warned: Cell::new(false),
+            warned: Cell::new(None),
         }
+    }
+
+    /// The signal that asked to stop, if one has arrived.
+    fn stop_signal(&self) -> Option<StopSignal> {
+        (self.requested)()
     }
 
     /// The warning to show the first time a stop has been requested.
-    fn warning(&self, remaining: Duration) -> Option<String> {
-        if self.warned.get() || !(self.requested)() {
+    fn warning(&self, stage: Stage) -> Option<String> {
+        if self.warned.get().is_some() || self.stop_signal().is_none() {
             return None;
         }
-        self.warned.set(true);
-        Some(stop_warning(remaining))
+        self.warned.set(Some(stage));
+        Some(stop_warning(stage))
     }
 }
 
-fn stop_warning(remaining: Duration) -> String {
+fn stop_warning(stage: Stage) -> String {
+    let Stage::Writing { remaining } = stage else {
+        return "Checking the installed firmware. Leave the controller connected; this takes up to 30 seconds.".into();
+    };
     let minutes = remaining.as_secs().div_ceil(60).max(1);
     let unit = if minutes == 1 { "minute" } else { "minutes" };
     format!(
@@ -421,7 +494,7 @@ impl KeepAwake {
         match command.spawn() {
             Ok(child) => Self(Some(child)),
             Err(error) => {
-                eprintln!("{}", keep_awake_warning(&error));
+                alert!("{}", keep_awake_warning(&error));
                 Self(None)
             }
         }
@@ -474,10 +547,10 @@ impl<'a, T: Transport, P: Pacer> DualSenseUpdater<'a, T, P> {
                 "Invalid image size before StartUpdate".into(),
             ));
         }
-        println!("Preparing controller for firmware installation...");
+        say!("Preparing controller for firmware installation...");
         self.send(UpdateCommand::StartUpdate, &data[..HEADER_LEN])?;
         self.wait(UpdateCommand::StartUpdate)?;
-        println!(
+        say!(
             "Writing firmware to controller over USB. Keep it connected until verification finishes."
         );
         let progress = &self.progress;
@@ -508,7 +581,7 @@ impl<'a, T: Transport, P: Pacer> DualSenseUpdater<'a, T, P> {
                     self.pacer.sleep(PACKET_DELAY);
                 }
                 if !self.interactive {
-                    println!(
+                    say!(
                         "Writing: {}/{blocks} blocks | Elapsed: {}s",
                         idx + 1,
                         (self.pacer.now() - transfer_started).as_secs()
@@ -524,17 +597,15 @@ impl<'a, T: Transport, P: Pacer> DualSenseUpdater<'a, T, P> {
             return Err(error);
         }
         progress.finish_and_clear();
-        println!(
+        say!(
             "USB transfer complete in {:.1}s. Verifying firmware on controller...",
             (self.pacer.now() - transfer_started).as_secs_f64()
         );
         self.send(UpdateCommand::VerifyUpdateImage, &[])?;
         self.wait(UpdateCommand::VerifyUpdateImage)?;
-        println!("Image verification accepted.");
+        say!("Image verification accepted.");
         self.send(UpdateCommand::FinalizeUpdate, &[])?;
-        println!(
-            "Finalization sent. Keep the controller connected for the installed-version check."
-        );
+        say!("Finalization sent. Keep the controller connected for the installed-version check.");
         Ok(())
     }
 
@@ -573,8 +644,10 @@ impl<'a, T: Transport, P: Pacer> DualSenseUpdater<'a, T, P> {
     }
 
     fn warn_if_stop_requested(&self) {
-        if let Some(warning) = self.signals.warning(self.remaining()) {
-            self.progress.suspend(|| eprintln!("{warning}"));
+        if let Some(warning) = self.signals.warning(Stage::Writing {
+            remaining: self.remaining(),
+        }) {
+            self.progress.suspend(|| alert!("{warning}"));
         }
     }
 
@@ -791,6 +864,8 @@ mod tests {
         reads: Cell<usize>,
         stop_requested: Rc<Cell<bool>>,
         deferred: Cell<bool>,
+        /// Use the real process-wide signal deferral rather than `stop_requested`.
+        process_signals: bool,
         /// Set by an install: the original handle must be closed before a new one is opened.
         original_closed: RefCell<Option<Rc<Cell<bool>>>>,
     }
@@ -808,6 +883,7 @@ mod tests {
                 reads: Cell::new(0),
                 stop_requested: Rc::new(Cell::new(false)),
                 deferred: Cell::new(false),
+                process_signals: false,
                 original_closed: RefCell::new(None),
             }
         }
@@ -845,6 +921,9 @@ mod tests {
         }
         fn defer_signals(&self) -> Result<SignalDeferral> {
             self.deferred.set(true);
+            if self.process_signals {
+                return SignalDeferral::process();
+            }
             let requested = self.stop_requested.clone();
             Ok(SignalDeferral::new(move || requested.get()))
         }
@@ -866,6 +945,10 @@ mod tests {
     }
 
     fn install_on(fake: &FakeController, host: &FakeHost) -> Result<InstallOutcome> {
+        install_stopping_on(fake, host).result
+    }
+
+    fn install_stopping_on(fake: &FakeController, host: &FakeHost) -> Installation {
         *host.original_closed.borrow_mut() = Some(fake.closed.clone());
         install_with(Handle(fake), PATH, &image(), host)
     }
@@ -1235,23 +1318,43 @@ mod tests {
         DualSenseUpdater::new(Handle(&fake), &clock, &signals, false)
             .flash(&image())
             .unwrap();
-        assert!(signals.warned.get());
-        assert!(signals.warning(Duration::from_secs(60)).is_none());
+        assert!(matches!(signals.warned.get(), Some(Stage::Writing { .. })));
+        assert!(signals.warning(Stage::Checking).is_none());
         assert_eq!(fake.commands().last(), Some(&UpdateCommand::FinalizeUpdate));
         assert_eq!(fake.count(UpdateCommand::StartUpdate), 5);
     }
 
     #[test]
-    fn stop_warning_names_the_remaining_minutes() {
+    fn a_stop_request_during_the_installed_version_check_says_so() {
+        let signals = SignalDeferral::new(|| true);
+        let expected = ControllerIdentity::of(&info(SERIES, HARDWARE, INSTALLED), PID);
+        let installed = verify_installed(&FakeHost::updated(), &signals, &expected, NEW).unwrap();
+        assert_eq!(installed.firmware_version, NEW);
+        assert_eq!(signals.warned.get(), Some(Stage::Checking));
+        assert!(signals.warning(Stage::Checking).is_none());
+    }
+
+    #[test]
+    fn stop_warning_matches_the_stage() {
+        let writing = |secs| {
+            stop_warning(Stage::Writing {
+                remaining: Duration::from_secs(secs),
+            })
+        };
         assert_eq!(
-            stop_warning(Duration::from_secs(150)),
+            writing(150),
             "Firmware is being written. Stopping now could leave the controller unusable; the update will finish in about 3 minutes."
         );
-        assert!(stop_warning(Duration::from_secs(20)).ends_with("about 1 minute."));
-        assert!(stop_warning(Duration::from_secs(60)).ends_with("about 1 minute."));
-        assert!(stop_warning(Duration::from_secs(61)).ends_with("about 2 minutes."));
+        assert!(writing(20).ends_with("about 1 minute."));
+        assert!(writing(60).ends_with("about 1 minute."));
+        assert!(writing(61).ends_with("about 2 minutes."));
+        assert_eq!(
+            stop_warning(Stage::Checking),
+            "Checking the installed firmware. Leave the controller connected; this takes up to 30 seconds."
+        );
         let deferral = SignalDeferral::new(|| false);
-        assert!(deferral.warning(Duration::from_secs(60)).is_none());
+        assert!(deferral.warning(Stage::Checking).is_none());
+        assert!(deferral.warned.get().is_none());
     }
 
     #[test]
@@ -1271,35 +1374,112 @@ mod tests {
         );
     }
 
-    // Re-run this binary: the child holds a deferral, raises both signals, then drops it and
-    // must die from SIGTERM, proving default behaviour is restored.
+    /// Re-run this test binary with `mode` in `DSMAC_SIGNAL_MODE` and return how the child ended.
+    #[cfg(unix)]
+    fn signal_child(test: &str, mode: &str) -> std::process::ExitStatus {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1"])
+            .env("DSMAC_SIGNAL_MODE", mode)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn signal_named(name: &str) -> i32 {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+        match name {
+            "SIGINT" => SIGINT,
+            "SIGTERM" => SIGTERM,
+            "SIGHUP" => SIGHUP,
+            _ => unreachable!("{name}"),
+        }
+    }
+
+    // Re-run this binary: the child holds a deferral, raises all three signals, then drops it and
+    // must die from the named signal, proving default behaviour is restored for each.
     #[cfg(unix)]
     #[test]
     fn signal_deferral_holds_signals_then_restores_default_termination() {
         use signal_hook::{consts, low_level::raise};
         use std::os::unix::process::ExitStatusExt;
-        if std::env::var_os("DSMAC_DEFER_CHILD").is_some() {
+        if let Ok(name) = std::env::var("DSMAC_SIGNAL_MODE") {
             let deferral = SignalDeferral::process().unwrap();
             raise(consts::SIGINT).unwrap();
             raise(consts::SIGTERM).unwrap();
-            let warning = deferral.warning(Duration::from_secs(150)).unwrap();
+            raise(consts::SIGHUP).unwrap();
+            let remaining = Duration::from_secs(150);
+            let warning = deferral.warning(Stage::Writing { remaining }).unwrap();
             assert!(warning.ends_with("about 3 minutes."));
-            assert!(deferral.warning(Duration::from_secs(150)).is_none());
+            assert!(deferral.warning(Stage::Writing { remaining }).is_none());
             drop(deferral);
-            raise(consts::SIGTERM).unwrap();
+            raise(signal_named(&name)).unwrap();
             thread::sleep(Duration::from_secs(5));
             std::process::exit(0);
         }
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
+        for name in ["SIGINT", "SIGTERM", "SIGHUP"] {
+            let status = signal_child(
                 "update::tests::signal_deferral_holds_signals_then_restores_default_termination",
-                "--test-threads=1",
-            ])
-            .env("DSMAC_DEFER_CHILD", "1")
-            .status()
-            .unwrap();
-        assert_eq!(status.signal(), Some(consts::SIGTERM));
+                name,
+            );
+            assert_eq!(status.signal(), Some(signal_named(name)), "{name}");
+        }
+    }
+
+    // Re-run this binary: the child runs a whole install with the process-wide deferral while
+    // all three signals arrive during the installed-version check. The install must finish, and
+    // once it returns (verified or failed) the named signal must terminate the child.
+    #[cfg(unix)]
+    #[test]
+    fn signals_during_an_install_are_held_and_default_termination_returns_after() {
+        use signal_hook::{consts, low_level::raise};
+        use std::os::unix::process::ExitStatusExt;
+        if let Ok(mode) = std::env::var("DSMAC_SIGNAL_MODE") {
+            let (outcome, name) = mode.split_once(':').unwrap();
+            let fake = FakeController {
+                fail_send_at: (outcome == "error").then_some(10),
+                ..FakeController::new()
+            };
+            let version = if outcome == "error" { INSTALLED } else { NEW };
+            let host = FakeHost {
+                process_signals: true,
+                ..FakeHost::new(
+                    |n| {
+                        // n = 0 is the preflight; later enumerations are the installed-version check.
+                        if n == 1 {
+                            for signal in [consts::SIGINT, consts::SIGTERM, consts::SIGHUP] {
+                                raise(signal).unwrap();
+                            }
+                        }
+                        vec![usb(PATH, PID)]
+                    },
+                    move |_, _| Ok(info(SERIES, HARDWARE, version)),
+                )
+            };
+            let installation = install_stopping_on(&fake, &host);
+            let result = installation.result;
+            assert_eq!(result.is_ok(), outcome == "ok", "{result:?}");
+            // The last signal raised is the one reported.
+            assert_eq!(installation.stop_requested, Some(StopSignal::Hangup));
+            assert!(host.enumerations.get() > 1);
+            raise(signal_named(name)).unwrap();
+            thread::sleep(Duration::from_secs(5));
+            std::process::exit(0);
+        }
+        for outcome in ["ok", "error"] {
+            for name in ["SIGINT", "SIGTERM", "SIGHUP"] {
+                let status = signal_child(
+                    "update::tests::signals_during_an_install_are_held_and_default_termination_returns_after",
+                    &format!("{outcome}:{name}"),
+                );
+                assert_eq!(
+                    status.signal(),
+                    Some(signal_named(name)),
+                    "{outcome} {name}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1344,6 +1524,42 @@ mod tests {
     }
 
     // The guarded install.
+
+    #[test]
+    fn install_reports_a_held_stop_request_with_a_success() {
+        let fake = FakeController::new();
+        let host = FakeHost::updated();
+        host.stop_requested.set(true);
+        let installation = install_stopping_on(&fake, &host);
+        assert!(matches!(
+            installation.result,
+            Ok(InstallOutcome::Verified(_))
+        ));
+        assert_eq!(installation.stop_requested, Some(StopSignal::Interrupt));
+        assert_eq!(fake.count(UpdateCommand::FinalizeUpdate), 1);
+    }
+
+    #[test]
+    fn install_reports_a_held_stop_request_with_a_failure_and_never_retries() {
+        let fake = FakeController::new();
+        // The controller never reports the new version, so the install fails verification.
+        let host = FakeHost::new(
+            |_| vec![usb(PATH, PID)],
+            |_, _| Ok(info(SERIES, HARDWARE, INSTALLED)),
+        );
+        host.stop_requested.set(true);
+        let installation = install_stopping_on(&fake, &host);
+        assert!(installation.result.is_err());
+        assert_eq!(installation.stop_requested, Some(StopSignal::Interrupt));
+        assert_eq!(fake.count(UpdateCommand::StartUpdate), 5);
+    }
+
+    #[test]
+    fn install_reports_no_stop_when_none_was_requested() {
+        let installation = install_stopping_on(&FakeController::new(), &FakeHost::updated());
+        assert!(installation.result.is_ok());
+        assert_eq!(installation.stop_requested, None);
+    }
 
     #[test]
     fn install_verifies_on_a_new_handle_after_the_full_sequence() {
@@ -1495,7 +1711,7 @@ mod tests {
         let host = FakeHost::updated();
         assert_eq!(
             install_on(&fake, &host).unwrap_err().to_string(),
-            "Charge the controller to at least 10% before updating"
+            "Battery is at 5%. Charge the controller to at least 10% (it charges over the USB cable), then refresh and try again."
         );
         assert!(fake.reports.borrow().is_empty());
         assert!(!host.deferred.get());

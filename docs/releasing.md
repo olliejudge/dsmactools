@@ -6,6 +6,11 @@ The GitHub repository is `olliejudge/dsmactools`; the display name is DS Mac Too
 
 1. Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` and the `--tag v<VERSION>` in `docs/install.md`. Do not alter an existing release tag.
 2. Run `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings` and `cargo build --release --locked`. Exercise the menu in a real terminal. Read-only controller checks and short feedback tests are sufficient; do not reflash a current controller just to test a release.
+   A release that changes the update path also needs hardware checks on a connected standard DualSense, with Steam and other controller tools closed. Record each result in `docs/research.md`:
+   - Read-only, over USB: confirm the single-controller check sees the controller while an update handle is open. Run `cargo run --locked --example enumerate_while_open`; it must report the opened path still listed. Also run `dsmactools --check` and open the menu dashboard.
+   - With two controllers connected, if available: confirm the update is refused before anything is written.
+   - A real update only if Sony's live catalogue has an image newer than the installed version. Never reflash a current controller for testing.
+   - Record DualSense Edge and Intel results separately. Do not assume them from the standard controller on Apple Silicon.
 3. Commit and push `main`. Wait for the macOS and Linux CI checks to pass for that exact commit.
 4. Tag the reviewed commit `v<VERSION>`, push the tag, and create a stable GitHub release with its changes and tested hardware limitations.
 5. Download `https://github.com/olliejudge/dsmactools/archive/refs/tags/v<VERSION>.tar.gz`; compute `shasum -a 256` on that downloaded archive. GitHub's compressed archive bytes can differ from a locally generated archive.

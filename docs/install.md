@@ -94,7 +94,7 @@ This removes **all** of Rust, including anything else installed with `cargo`. Do
 
 DS Mac Tools does not collect or upload anything. It only saves:
 
-- **Downloaded firmware**, in `~/Library/Caches/ds-mac-tools/firmware`. Each download sits in a folder named after its firmware target code and version, with a small `manifest.json` recording where it came from and its checksum. It is safe to delete this folder at any time; the app downloads firmware again when it needs it.
+- **Downloaded firmware**, in `~/Library/Caches/ds-mac-tools/firmware`. Each download sits in a folder named after its firmware target code and version, with a small `manifest.json` recording where it came from and its checksum. If a download for the same firmware is already there, the app reuses it, but only after checking that its checksum matches `manifest.json` and that it still passes every compatibility check; otherwise it downloads again. The menu's **Downloaded firmware** item shows this folder and its size and can delete the downloads (only the firmware files the app saved). It is also safe to delete the folder yourself at any time; the app downloads firmware again when it needs it.
 - **Session recordings**, only when you make one, in the file you choose (for example `session.jsonl`).
 
 To keep firmware downloads somewhere else, add `--cache-dir` with a folder of your choice:
@@ -103,4 +103,4 @@ To keep firmware downloads somewhere else, add `--cache-dir` with a folder of yo
 dsmactools --download-latest --cache-dir ~/Documents/dualsense-firmware
 ```
 
-If you use `--cache-dir`, delete that folder yourself when you uninstall.
+With `--cache-dir`, the menu's delete option removes only the firmware files DS Mac Tools saved in that folder, and leaves the folder and anything else in it. Delete the folder yourself when you uninstall.

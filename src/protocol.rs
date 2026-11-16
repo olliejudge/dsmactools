@@ -31,9 +31,9 @@ pub fn battery_percent(report: &[u8]) -> Result<u8> {
 /// Refuse a firmware update when the controller's charge is below the update threshold.
 pub fn require_update_battery(percent: u8) -> Result<u8> {
     if percent < MIN_UPDATE_BATTERY_PERCENT {
-        return Err(AppError::Validation(
-            "Charge the controller to at least 10% before updating".into(),
-        ));
+        return Err(AppError::Validation(format!(
+            "Battery is at {percent}%. Charge the controller to at least {MIN_UPDATE_BATTERY_PERCENT}% (it charges over the USB cable), then refresh and try again."
+        )));
     }
     Ok(percent)
 }
@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(require_update_battery(10).unwrap(), 10);
         assert_eq!(
             require_update_battery(9).unwrap_err().to_string(),
-            "Charge the controller to at least 10% before updating"
+            "Battery is at 9%. Charge the controller to at least 10% (it charges over the USB cable), then refresh and try again."
         );
     }
 

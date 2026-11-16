@@ -5,8 +5,21 @@
 - Clearly distinguish firmware downloads, USB writing and installed-version verification.
 - Explain that writing firmware can take several minutes, and show elapsed time and estimated transfer time remaining.
 - Keep redirected and basic-terminal progress readable without animated output.
+- Refuse to update when more than one controller is connected, and check the controller again just before writing.
+- Keep the Mac awake while firmware is being written.
+- Warn on Ctrl-C, SIGTERM or closing Terminal during an update, let the update finish, then exit.
+- Reuse a downloaded image that has already been verified.
+- View and delete downloaded firmware from the menu.
+- Show a clearer message for a low battery, plus a notice on the dashboard.
+- Add a hint to connect over USB when the controller is connected over Bluetooth.
+- Detect a DualSense Edge automatically and warn that its update is untested.
+- Show plainer messages for network errors.
 - Provide prebuilt Homebrew packages for macOS 15 Sequoia or later on both Apple Silicon and Intel, so these Macs no longer need to build Rust from source.
 - Add an install guide covering Homebrew, an alternative install with Rust's official installer, uninstalling and removing downloaded firmware.
+- Keep the testing tools and `--print-firmware-info` usable with controllers whose firmware series is not supported for updates.
+- Stop diagnostics from opening the developer tools installer.
+- Fix Ctrl-C after running a menu tool, and make `--path` find the controller after an update.
+- Reduce the size of the binary.
 
 ## 0.4.0
 

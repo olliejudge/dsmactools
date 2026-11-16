@@ -66,14 +66,37 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
             "4194304",
             url,
         ])
-        .output()?;
+        .output()
+        .map_err(|e| {
+            log::debug!("Could not run curl: {e}");
+            invalid(if e.kind() == std::io::ErrorKind::NotFound {
+                "Couldn't find curl, which is needed to contact Sony's firmware server."
+            } else {
+                FETCH_FAILED
+            })
+        })?;
     if !output.status.success() {
-        return Err(invalid(format!(
-            "Sony download failed: {}",
+        // The raw curl detail stays behind -v, like the other protocol debugging.
+        log::debug!(
+            "curl failed ({:?}): {}",
+            output.status.code(),
             String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        );
+        return Err(invalid(fetch_failure_message(output.status.code())));
     }
     Ok(output.stdout)
+}
+
+const FETCH_FAILED: &str =
+    "Couldn't reach Sony's firmware server. Check your internet connection and try again.";
+
+/// A plain-language reason for a failed curl run. `22` is an HTTP error answer (`--fail`),
+/// which means the server was reached.
+fn fetch_failure_message(exit_code: Option<i32>) -> &'static str {
+    match exit_code {
+        Some(22) => "Sony's firmware server didn't return the file. Try again later.",
+        _ => FETCH_FAILED,
+    }
 }
 
 pub fn latest(target: &str) -> Result<u16> {
@@ -241,20 +264,46 @@ impl FirmwareImage {
     }
 }
 
+/// Where an image returned by [`download`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageSource {
+    Downloaded,
+    /// An earlier download, reused after its checksum and compatibility were verified again.
+    Cached,
+}
+
 pub fn download(
     target: &str,
     version: u16,
     info: &FirmwareInfo,
     pid: u16,
     cache_dir: Option<&Path>,
-) -> Result<(FirmwareImage, PathBuf)> {
+) -> Result<(FirmwareImage, PathBuf, ImageSource)> {
+    download_with(target, version, info, pid, cache_dir, fetch)
+}
+
+fn download_with(
+    target: &str,
+    version: u16,
+    info: &FirmwareInfo,
+    pid: u16,
+    cache_dir: Option<&Path>,
+    fetch: impl FnOnce(&str) -> Result<Vec<u8>>,
+) -> Result<(FirmwareImage, PathBuf, ImageSource)> {
     let url = format!("{SONY_BASE}/fwupdate{target}/0x{version:04X}/FWUPDATE{target}.bin");
-    let image = FirmwareImage::validate(fetch(&url)?, info, pid, Some(version))?;
     let dir = cache_directory(cache_dir)?
         .join(target)
         .join(format!("0x{version:04X}"));
-    std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("FWUPDATE{target}.bin"));
+    // A cached copy is only a shortcut for the network fetch: it must match its recorded
+    // checksum and then passes the same validation as a fresh download.
+    if let Some(data) = verified_cached_image(&dir, target, version)
+        && let Ok(image) = FirmwareImage::validate(data, info, pid, Some(version))
+    {
+        return Ok((image, path, ImageSource::Cached));
+    }
+    let image = FirmwareImage::validate(fetch(&url)?, info, pid, Some(version))?;
+    std::fs::create_dir_all(&dir)?;
     // A partial file cannot become the cached firmware image.
     let temporary = dir.join(format!(".download-{}", std::process::id()));
     std::fs::write(&temporary, image.data())?;
@@ -265,7 +314,147 @@ pub fn download(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|e| invalid(e.to_string()))?,
     )?;
-    Ok((image, path))
+    Ok((image, path, ImageSource::Downloaded))
+}
+
+/// The cached image for exactly this target and version, if `manifest.json` names the same
+/// target, version, size and SHA-256 as the file's actual contents. Anything else is `None`.
+fn verified_cached_image(dir: &Path, target: &str, version: u16) -> Option<Vec<u8>> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    if manifest.get("target")?.as_str()? != target
+        || manifest.get("version")?.as_str()? != format!("0x{version:04X}")
+        || manifest.get("bytes")?.as_u64()? != FIRMWARE_SIZE as u64
+    {
+        return None;
+    }
+    let recorded = manifest.get("sha256")?.as_str()?;
+    let file = dir.join(format!("FWUPDATE{target}.bin"));
+    // Never follow a symlink to some other file.
+    let meta = std::fs::symlink_metadata(&file).ok()?;
+    if !meta.is_file() || meta.len() != FIRMWARE_SIZE as u64 {
+        return None;
+    }
+    let data = std::fs::read(&file).ok()?;
+    (format!("{:x}", Sha256::digest(&data)) == recorded.to_ascii_lowercase()).then_some(data)
+}
+
+/// The count and total size of downloaded firmware files.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CacheUsage {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// A downloaded-firmware file this app writes: an image, its manifest or a partial download.
+fn is_app_file(name: &str) -> bool {
+    name == "manifest.json"
+        || name.starts_with(".download-")
+        || (name.starts_with("FWUPDATE") && name.ends_with(".bin"))
+}
+
+/// Every directory level this app creates: `<target>/0x<version>` under the cache.
+fn is_target_dir(name: &str) -> bool {
+    name.len() == 4 && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_version_dir(name: &str) -> bool {
+    name.strip_prefix("0x")
+        .is_some_and(|v| v.len() == 4 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn subdirs(dir: &Path, accept: fn(&str) -> bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        // `file_type` does not follow symlinks, so a link can never lead outside the cache.
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| e.file_name().to_str().is_some_and(accept))
+        .map(|e| e.path())
+        .collect()
+}
+
+fn app_files(dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(is_app_file))
+        .filter_map(|e| {
+            let meta = std::fs::symlink_metadata(e.path()).ok()?;
+            meta.is_file().then(|| (e.path(), meta.len()))
+        })
+        .collect()
+}
+
+fn app_downloads(root: &Path) -> Vec<(PathBuf, u64)> {
+    subdirs(root, is_target_dir)
+        .iter()
+        .flat_map(|t| subdirs(t, is_version_dir))
+        .flat_map(|v| app_files(&v))
+        .collect()
+}
+
+/// The firmware this app has downloaded under `root`: file count and total size.
+pub fn cache_usage(root: &Path) -> CacheUsage {
+    app_downloads(root)
+        .iter()
+        .fold(CacheUsage::default(), |usage, (_, len)| CacheUsage {
+            files: usage.files + 1,
+            bytes: usage.bytes + len,
+        })
+}
+
+/// Refuse to delete from anywhere but this app's own cache: the default
+/// `.../ds-mac-tools/firmware` folder or the exact `--cache-dir` in effect. A symlinked root is
+/// refused too, as are the filesystem root and the home folder.
+fn check_cache_root(root: &Path, explicit: Option<&Path>, home: Option<&Path>) -> Result<()> {
+    let expected = root.ends_with("ds-mac-tools/firmware") || explicit == Some(root);
+    let dangerous = root.parent().is_none() || home == Some(root);
+    if !expected || dangerous {
+        return Err(invalid(format!(
+            "Refusing to delete from {}: it is not DS Mac Tools' firmware folder",
+            root.display()
+        )));
+    }
+    match std::fs::symlink_metadata(root) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(invalid(format!(
+            "Refusing to delete from {}: it is not a plain folder",
+            root.display()
+        ))),
+        // Nothing there, so nothing to delete.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Delete downloaded firmware from the cache at `root` (see [`check_cache_root`]). Only the
+/// files and folders this app creates are removed, so a `--cache-dir` holding anything else
+/// keeps it. Folders left empty are removed, and so is the default cache folder itself.
+pub fn delete_downloads(root: &Path, explicit: Option<&Path>) -> Result<CacheUsage> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    check_cache_root(root, explicit, home.as_deref())?;
+    let mut removed = CacheUsage::default();
+    for (file, len) in app_downloads(root) {
+        std::fs::remove_file(&file)?;
+        removed.files += 1;
+        removed.bytes += len;
+    }
+    for target in subdirs(root, is_target_dir) {
+        for version in subdirs(&target, is_version_dir) {
+            let _ = std::fs::remove_dir(version);
+        }
+        let _ = std::fs::remove_dir(target);
+    }
+    // Only the default cache folder is ours to remove; a chosen --cache-dir stays.
+    if root.ends_with("ds-mac-tools/firmware") {
+        let _ = std::fs::remove_dir(root);
+    }
+    Ok(removed)
 }
 
 pub fn cache_directory(override_path: Option<&Path>) -> Result<PathBuf> {
@@ -396,6 +585,208 @@ mod tests {
             PathBuf::from("/tmp/ds-test-cache")
         );
     }
+    /// A fresh, empty directory under the system temp folder, removed on drop.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "dsmactools-test-{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn fetch_ok(data: Vec<u8>) -> impl FnOnce(&str) -> Result<Vec<u8>> {
+        move |_| Ok(data)
+    }
+    fn fetch_forbidden(_: &str) -> Result<Vec<u8>> {
+        Err(invalid("must not download"))
+    }
+    fn run_download(
+        cache: &Path,
+        fetch: impl FnOnce(&str) -> Result<Vec<u8>>,
+    ) -> Result<(FirmwareImage, PathBuf, ImageSource)> {
+        download_with("000B", 0x0630, &info(), 0x0ce6, Some(cache), fetch)
+    }
+    fn image_sha() -> String {
+        format!("{:x}", Sha256::digest(image()))
+    }
+
+    #[test]
+    fn download_is_cached_and_reused_without_the_network() {
+        let tmp = TempDir::new("reuse");
+        let (first, path, source) = run_download(&tmp.0, fetch_ok(image())).unwrap();
+        assert_eq!(source, ImageSource::Downloaded);
+        assert!(path.ends_with("000B/0x0630/FWUPDATE000B.bin"));
+        let (second, path2, source) = run_download(&tmp.0, fetch_forbidden).unwrap();
+        assert_eq!(source, ImageSource::Cached);
+        assert_eq!(path2, path);
+        assert_eq!(second.sha256(), first.sha256());
+        assert_eq!(second.version(), 0x0630);
+    }
+
+    #[test]
+    fn cached_image_still_goes_through_full_validation() {
+        let tmp = TempDir::new("revalidate");
+        run_download(&tmp.0, fetch_ok(image())).unwrap();
+        // A controller that is already up to date refuses the cached image, as a fresh one.
+        let mut current = info();
+        current.firmware_version = 0x0630;
+        let result = download_with(
+            "000B",
+            0x0630,
+            &current,
+            0x0ce6,
+            Some(&tmp.0),
+            fetch_forbidden,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tampered_cache_is_rejected_and_downloaded_again() {
+        let tmp = TempDir::new("tampered");
+        let (_, path, _) = run_download(&tmp.0, fetch_ok(image())).unwrap();
+        let mut bad = image();
+        bad[0x2000] ^= 0xff; // same size and header, different contents
+        std::fs::write(&path, &bad).unwrap();
+        let (fresh, _, source) = run_download(&tmp.0, fetch_ok(image())).unwrap();
+        assert_eq!(source, ImageSource::Downloaded);
+        assert_eq!(fresh.data(), image().as_slice());
+        // The tampered file is replaced and the next call can reuse the good copy.
+        assert_eq!(std::fs::read(&path).unwrap(), image());
+        assert_eq!(
+            run_download(&tmp.0, fetch_forbidden).unwrap().2,
+            ImageSource::Cached
+        );
+    }
+
+    #[test]
+    fn cache_without_a_matching_manifest_is_ignored() {
+        let tmp = TempDir::new("manifest");
+        let (_, path, _) = run_download(&tmp.0, fetch_ok(image())).unwrap();
+        let manifest = path.with_file_name("manifest.json");
+        let good = std::fs::read(&manifest).unwrap();
+        let text = String::from_utf8(good.clone()).unwrap();
+        for broken in [
+            None,
+            Some(b"not json".to_vec()),
+            Some(text.replace("0x0630", "0x0631").into_bytes()),
+            Some(text.replace("000B", "0004").into_bytes()),
+            Some(text.replacen(&image_sha(), &"0".repeat(64), 1).into_bytes()),
+        ] {
+            match broken {
+                None => std::fs::remove_file(&manifest).unwrap(),
+                Some(bytes) => std::fs::write(&manifest, bytes).unwrap(),
+            }
+            let source = run_download(&tmp.0, fetch_ok(image())).unwrap().2;
+            assert_eq!(source, ImageSource::Downloaded);
+            std::fs::write(&manifest, &good).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_download_does_not_touch_the_cache() {
+        let tmp = TempDir::new("failed");
+        assert!(run_download(&tmp.0, fetch_forbidden).is_err());
+        assert!(!tmp.0.join("000B").exists());
+        // A bad download is refused before anything is cached.
+        let mut wrong = image();
+        wrong[0x62] ^= 1;
+        assert!(run_download(&tmp.0, fetch_ok(wrong)).is_err());
+        assert!(!tmp.0.join("000B").exists());
+    }
+
+    #[test]
+    fn network_failures_get_plain_messages() {
+        assert!(
+            fetch_failure_message(Some(6)).starts_with("Couldn't reach Sony's firmware server.")
+        );
+        assert_eq!(fetch_failure_message(None), FETCH_FAILED);
+        assert!(fetch_failure_message(Some(22)).contains("didn't return the file"));
+    }
+
+    #[test]
+    fn delete_guard_accepts_only_the_app_cache_or_the_explicit_directory() {
+        let home = Path::new("/Users/someone");
+        let check = |root: &str, explicit: Option<&str>| {
+            check_cache_root(Path::new(root), explicit.map(Path::new), Some(home)).is_ok()
+        };
+        assert!(check(
+            "/Users/someone/Library/Caches/ds-mac-tools/firmware",
+            None
+        ));
+        assert!(check("/x/ds-mac-tools/firmware", None));
+        assert!(check("/data/fw", Some("/data/fw")));
+        for refused in ["/", "/Users/someone", "/Users/someone/Documents", "/tmp"] {
+            assert!(!check(refused, None), "{refused}");
+        }
+        // Nearly right names, or an explicit directory that differs, are refused.
+        assert!(!check("/x/ds-mac-tools/firmware-old", None));
+        assert!(!check("/x/not-ds-mac-tools/firmware", None));
+        assert!(!check("/Users/someone/Documents", Some("/data/fw")));
+        // Even an explicit --cache-dir cannot be the root or the home folder.
+        assert!(!check("/", Some("/")));
+        assert!(!check("/Users/someone", Some("/Users/someone")));
+    }
+
+    #[test]
+    fn delete_removes_only_app_files_and_never_follows_symlinks() {
+        let tmp = TempDir::new("delete");
+        let outside = TempDir::new("delete-outside");
+        std::fs::write(outside.0.join("precious.txt"), b"keep").unwrap();
+        let root = tmp.0.join("cache");
+        run_download(&root, fetch_ok(image())).unwrap();
+        std::fs::write(root.join("notes.txt"), b"mine").unwrap();
+        let version_dir = root.join("000B/0x0630");
+        std::fs::write(version_dir.join("unrelated.txt"), b"mine").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside.0, root.join("0004")).unwrap();
+            std::os::unix::fs::symlink(&outside.0, version_dir.join(".download-1")).unwrap();
+        }
+        let usage = cache_usage(&root);
+        assert_eq!(usage.files, 2); // image and manifest
+        assert!(usage.bytes > FIRMWARE_SIZE as u64);
+        let removed = delete_downloads(&root, Some(&root)).unwrap();
+        assert_eq!(removed, usage);
+        assert_eq!(cache_usage(&root), CacheUsage::default());
+        assert!(!version_dir.join("FWUPDATE000B.bin").exists());
+        assert!(root.join("notes.txt").exists());
+        assert!(version_dir.join("unrelated.txt").exists());
+        assert!(outside.0.join("precious.txt").exists());
+    }
+
+    #[test]
+    fn delete_refuses_a_symlinked_or_unexpected_cache_root() {
+        let tmp = TempDir::new("root");
+        let outside = TempDir::new("root-outside");
+        std::fs::write(outside.0.join("precious.txt"), b"keep").unwrap();
+        assert!(delete_downloads(&tmp.0.join("other"), None).is_err());
+        #[cfg(unix)]
+        {
+            let link = tmp.0.join("ds-mac-tools-link");
+            std::os::unix::fs::symlink(&outside.0, &link).unwrap();
+            assert!(delete_downloads(&link, Some(&link)).is_err());
+        }
+        assert!(outside.0.join("precious.txt").exists());
+        // A missing cache folder is simply empty.
+        let missing = tmp.0.join("nothing-here");
+        assert_eq!(
+            delete_downloads(&missing, Some(&missing)).unwrap(),
+            CacheUsage::default()
+        );
+    }
+
     #[test]
     fn full_catalogue_detects_versions_new_targets_and_removed_entries() {
         let baseline: serde_json::Value =

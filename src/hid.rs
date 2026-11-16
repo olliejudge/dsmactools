@@ -6,6 +6,34 @@ use crate::error::{AppError, Result};
 use crate::protocol::{self, FirmwareInfo, REPORT_ID_FIRMWARE_INFO};
 use crate::update::UpdateAccess;
 
+const SONY_VENDOR_ID: u16 = 0x054c;
+/// DualSense and DualSense Edge.
+const SUPPORTED_PRODUCT_IDS: [u16; 2] = [0x0ce6, 0x0df2];
+
+/// Shown when a controller is paired over Bluetooth but none is connected over USB.
+pub const BLUETOOTH_HINT: &str = "Your controller is connected over Bluetooth. Connect it with a USB data cable to update or test it.";
+
+fn is_supported_controller(vid: u16, pid: u16) -> bool {
+    vid == SONY_VENDOR_ID && SUPPORTED_PRODUCT_IDS.contains(&pid)
+}
+
+fn is_usb_controller(vid: u16, pid: u16, bus: BusType) -> bool {
+    is_supported_controller(vid, pid) && matches!(bus, BusType::Usb)
+}
+
+fn is_bluetooth_controller(vid: u16, pid: u16, bus: BusType) -> bool {
+    is_supported_controller(vid, pid) && matches!(bus, BusType::Bluetooth)
+}
+
+/// Whether a DualSense or Edge is visible over Bluetooth. This only enumerates; a Bluetooth
+/// device is never opened. Enumeration failures count as "no".
+pub fn bluetooth_controller_present() -> bool {
+    HidApi::new().is_ok_and(|api| {
+        api.device_list()
+            .any(|d| is_bluetooth_controller(d.vendor_id(), d.product_id(), d.bus_type()))
+    })
+}
+
 pub struct DualSenseHid {
     _api: HidApi,
     dev: HidDevice,
@@ -16,9 +44,16 @@ pub fn find_first_device_path(vid: u16, pid: u16) -> Result<String> {
     let mut devices = api.device_list().filter(|d| {
         d.vendor_id() == vid && d.product_id() == pid && matches!(d.bus_type(), BusType::Usb)
     });
-    let device = devices
-        .next()
-        .ok_or(AppError::DeviceNotFound { vid, pid })?;
+    let Some(device) = devices.next() else {
+        let bluetooth = api
+            .device_list()
+            .any(|d| is_bluetooth_controller(d.vendor_id(), d.product_id(), d.bus_type()));
+        return Err(if bluetooth {
+            AppError::Validation(BLUETOOTH_HINT.into())
+        } else {
+            AppError::DeviceNotFound { vid, pid }
+        });
+    };
     if devices.next().is_some() {
         return Err(AppError::Validation(
             "Multiple USB interfaces/controllers found; select --path from --list".into(),
@@ -114,11 +149,7 @@ pub fn controllers() -> Result<Vec<Controller>> {
     let api = HidApi::new()?;
     Ok(api
         .device_list()
-        .filter(|d| {
-            d.vendor_id() == 0x054c
-                && [0x0ce6, 0x0df2].contains(&d.product_id())
-                && matches!(d.bus_type(), BusType::Usb)
-        })
+        .filter(|d| is_usb_controller(d.vendor_id(), d.product_id(), d.bus_type()))
         .map(|d| Controller {
             path: d.path().to_string_lossy().into_owned(),
             pid: d.product_id(),
@@ -161,4 +192,26 @@ fn find_path<'a>(api: &'a HidApi, vid: u16, pid: u16, path_str: &str) -> Result<
         }
     }
     Err(AppError::DevicePathNotMatched(path_str.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bluetooth_hint_only_covers_supported_sony_controllers_over_bluetooth() {
+        assert!(is_bluetooth_controller(0x054c, 0x0ce6, BusType::Bluetooth));
+        assert!(is_bluetooth_controller(0x054c, 0x0df2, BusType::Bluetooth));
+        assert!(!is_bluetooth_controller(0x054c, 0x0ce6, BusType::Usb));
+        assert!(!is_bluetooth_controller(0x054c, 0x09cc, BusType::Bluetooth));
+        assert!(!is_bluetooth_controller(0x045e, 0x0ce6, BusType::Bluetooth));
+    }
+
+    #[test]
+    fn usb_listing_excludes_bluetooth_and_other_devices() {
+        assert!(is_usb_controller(0x054c, 0x0ce6, BusType::Usb));
+        assert!(is_usb_controller(0x054c, 0x0df2, BusType::Usb));
+        assert!(!is_usb_controller(0x054c, 0x0ce6, BusType::Bluetooth));
+        assert!(!is_usb_controller(0x054c, 0x0ba0, BusType::Usb));
+    }
 }

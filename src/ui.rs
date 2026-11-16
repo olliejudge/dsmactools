@@ -4,7 +4,7 @@ use crate::{
     feedback::{COLORS, Preset, Rgb, TriggerEffect, TriggerSide, ZoneLevels},
     firmware,
     hid::{self, Controller, DualSenseHid},
-    protocol::FirmwareInfo,
+    protocol::{FirmwareInfo, MIN_UPDATE_BATTERY_PERCENT},
 };
 use console::{Key, Term, style};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
@@ -24,6 +24,24 @@ struct Status {
     latest: std::result::Result<u16, String>,
 }
 
+pub const EDGE_UNTESTED_WARNING: &str =
+    "DualSense Edge firmware installation is not hardware-tested.";
+
+/// Dashboard warning when the charge is known and too low to update.
+fn low_battery_notice(battery: Option<u8>) -> Option<String> {
+    battery
+        .filter(|b| *b < MIN_UPDATE_BATTERY_PERCENT)
+        .map(|b| format!("Battery too low to update ({b}%)"))
+}
+
+fn format_size(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} bytes"),
+        b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),
+        b => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+    }
+}
+
 fn unsupported_message(series: u16) -> String {
     format!("This controller's firmware series 0x{series:04X} isn't supported for updates.")
 }
@@ -38,11 +56,13 @@ enum Resolution {
 /// it is gone (a firmware update re-enumerates the controller) normal discovery applies.
 fn resolve_controller(
     devices: &[Controller],
-    pinned: Option<(&str, u16)>,
+    pinned: Option<(&str, Option<u16>)>,
     previous: Option<&Controller>,
 ) -> Resolution {
     if let Some((path, pid)) = pinned
-        && let Some(device) = devices.iter().find(|d| d.path == path && d.pid == pid)
+        && let Some(device) = devices
+            .iter()
+            .find(|d| d.path == path && pid.is_none_or(|p| p == d.pid))
     {
         return Resolution::Use(device.clone());
     }
@@ -127,7 +147,12 @@ fn heading(term: &Term) -> Result<()> {
     Ok(())
 }
 
-fn dashboard(term: &Term, status: Option<&Status>, error: Option<&str>) -> Result<()> {
+fn dashboard(
+    term: &Term,
+    status: Option<&Status>,
+    bluetooth: bool,
+    error: Option<&str>,
+) -> Result<()> {
     heading(term)?;
     if let Some(s) = status {
         term.write_line(&format!("  {}  {}", style("●").green(), s.controller.name))?;
@@ -162,15 +187,19 @@ fn dashboard(term: &Term, status: Option<&Status>, error: Option<&str>) -> Resul
                 style("Could not check online").yellow()
             ))?,
         }
+        if let Some(notice) = low_battery_notice(s.battery) {
+            term.write_line(&format!("     {}", style(notice).yellow()))?;
+        }
         if s.controller.pid == 0x0df2 {
-            term.write_line(&format!(
-                "     {}",
-                style("DualSense Edge firmware installation is not hardware-tested.").yellow()
-            ))?;
+            term.write_line(&format!("     {}", style(EDGE_UNTESTED_WARNING).yellow()))?;
         }
     } else {
         term.write_line(&format!("  {}  No controller ready", style("○").yellow()))?;
-        term.write_line("     Connect a DualSense with a USB data cable, then refresh.")?;
+        if bluetooth {
+            term.write_line(&format!("     {}", hid::BLUETOOTH_HINT))?;
+        } else {
+            term.write_line("     Connect a DualSense with a USB data cable, then refresh.")?;
+        }
     }
     if let Some(error) = error {
         term.write_line(&format!(
@@ -438,6 +467,48 @@ fn configure_feedback(term: &Term, action: &mut Args) -> Result<bool> {
     Ok(true)
 }
 
+/// Show where downloaded firmware is kept and how much there is, and offer to delete it.
+fn downloaded_firmware(term: &Term, explicit: Option<&std::path::Path>) -> Result<()> {
+    let dir = match firmware::cache_directory(explicit) {
+        Ok(dir) => dir,
+        Err(e) => {
+            term.write_line(&format!("  {}", style(e).yellow()))?;
+            return Ok(());
+        }
+    };
+    let usage = firmware::cache_usage(&dir);
+    term.write_line(&format!("  Folder: {}", dir.display()))?;
+    if usage.files == 0 {
+        term.write_line("  No firmware has been downloaded.")?;
+        return Ok(());
+    }
+    term.write_line(&format!(
+        "  {} in {} files. Firmware is downloaded again whenever it's needed.",
+        format_size(usage.bytes),
+        usage.files
+    ))?;
+    term.write_line("")?;
+    let delete = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Delete downloaded firmware?")
+        .default(false)
+        .interact_on_opt(term)
+        .map_err(ui_error)?
+        .unwrap_or(false);
+    if !delete {
+        return Ok(());
+    }
+    match firmware::delete_downloads(&dir, explicit) {
+        Ok(removed) => term.write_line(&format!(
+            "  {} Deleted {} ({} files).",
+            style("✓").green(),
+            format_size(removed.bytes),
+            removed.files
+        ))?,
+        Err(e) => term.write_line(&format!("  {}", style(e).red()))?,
+    }
+    Ok(())
+}
+
 pub fn run(mut args: Args) -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(ui_error(
@@ -449,6 +520,7 @@ pub fn run(mut args: Args) -> Result<()> {
     let mut selected = None;
     let mut status = None;
     let mut error = None;
+    let mut bluetooth = false;
     let mut refresh = true;
     loop {
         if refresh {
@@ -461,11 +533,12 @@ pub fn run(mut args: Args) -> Result<()> {
                     if !args.path.is_empty()
                         && !devices
                             .iter()
-                            .any(|d| d.path == args.path && d.pid == args.pid)
+                            .any(|d| d.path == args.path && args.pid.is_none_or(|p| p == d.pid))
                     {
                         args.path.clear();
                     }
                     let pinned = (!args.path.is_empty()).then_some((args.path.as_str(), args.pid));
+                    bluetooth = devices.is_empty() && hid::bluetooth_controller_present();
                     selected = match resolve_controller(&devices, pinned, selected.as_ref()) {
                         Resolution::Use(device) => Some(device),
                         Resolution::Choose => select_controller(&term, &devices)?,
@@ -484,11 +557,12 @@ pub fn run(mut args: Args) -> Result<()> {
                 }
                 Err(e) => {
                     status = None;
+                    bluetooth = false;
                     error = Some(e.to_string());
                 }
             }
         }
-        dashboard(&term, status.as_ref(), error.as_deref())?;
+        dashboard(&term, status.as_ref(), bluetooth, error.as_deref())?;
         let items = [
             "Live input monitor",
             "Record a test session",
@@ -496,6 +570,7 @@ pub fn run(mut args: Args) -> Result<()> {
             "Developer diagnostics",
             "Firmware & controller details",
             "Refresh / choose controller",
+            "Downloaded firmware",
             "About DS Mac Tools",
             "Quit",
         ];
@@ -519,6 +594,11 @@ pub fn run(mut args: Args) -> Result<()> {
             }
             6 => {
                 heading(&term)?;
+                downloaded_firmware(&term, args.cache_dir.as_deref())?;
+                pause(&term)?;
+            }
+            7 => {
+                heading(&term)?;
                 term.write_line("  A controller workbench for Mac game developers and testers.")?;
                 term.write_line("  Firmware inspired by dualsense-updater-rs; terminal interaction inspired by Mole.")?;
                 term.write_line("  Independent software. Not endorsed by Sony or PlayStation.")?;
@@ -529,7 +609,7 @@ pub fn run(mut args: Args) -> Result<()> {
                 term.write_line("  https://github.com/olliejudge/dsmactools")?;
                 pause(&term)?;
             }
-            7 => break,
+            8 => break,
             3 => {
                 heading(&term)?;
                 if let Err(e) = crate::diagnostics::run() {
@@ -546,7 +626,7 @@ pub fn run(mut args: Args) -> Result<()> {
                 let mut action = args.clone();
                 action.interactive = false;
                 action.yes = false;
-                action.pid = s.controller.pid;
+                action.pid = Some(s.controller.pid);
                 action.path = s.controller.path.clone();
                 heading(&term)?;
                 match choice {
@@ -648,16 +728,44 @@ mod tests {
     }
 
     #[test]
+    fn pinned_path_without_a_pid_matches_any_model() {
+        let devices = [controller("a"), controller("b")];
+        assert!(matches!(
+            resolve_controller(&devices, Some(("b", None)), None),
+            Resolution::Use(d) if d.path == "b"
+        ));
+    }
+
+    #[test]
+    fn low_battery_notice_needs_a_known_level_below_the_update_minimum() {
+        assert_eq!(
+            low_battery_notice(Some(5)).as_deref(),
+            Some("Battery too low to update (5%)")
+        );
+        assert_eq!(low_battery_notice(Some(MIN_UPDATE_BATTERY_PERCENT)), None);
+        assert_eq!(low_battery_notice(Some(100)), None);
+        assert_eq!(low_battery_notice(None), None);
+    }
+
+    #[test]
+    fn sizes_are_shown_in_friendly_units() {
+        assert_eq!(format_size(0), "0 bytes");
+        assert_eq!(format_size(2048), "2.0 KB");
+        assert_eq!(format_size(950_272), "928.0 KB");
+        assert_eq!(format_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
     fn pinned_path_is_used_while_present_then_discovery_takes_over() {
         let devices = [controller("a"), controller("b")];
-        let pinned = Some(("b", 0x0ce6));
+        let pinned = Some(("b", Some(0x0ce6)));
         assert!(matches!(
             resolve_controller(&devices, pinned, Some(&devices[0])),
             Resolution::Use(d) if d.path == "b"
         ));
         // Wrong PID does not match the pin.
         assert!(matches!(
-            resolve_controller(&devices, Some(("b", 0x0df2)), None),
+            resolve_controller(&devices, Some(("b", Some(0x0df2))), None),
             Resolution::Choose
         ));
         // After re-enumeration the pinned path is gone; the single new device is found.

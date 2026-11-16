@@ -24,6 +24,8 @@ dsmactools --print-firmware-info --json
 dsmactools --help
 ```
 
+The command line uses the connected controller automatically. If exactly one model is plugged in (DualSense or DualSense Edge), `--pid` is not needed; with two different models, pass `--pid 0x0ce6` or `--pid 0x0df2` (or `--path`). An explicit `--pid` is always used as given.
+
 Capture timing measures host report arrival, not game latency. See the [capture format](captures.md) and [lightbar and trigger testing](feedback.md).
 
-Standard DualSense USB operation is hardware-tested. DualSense Edge is detected but not hardware-tested. Direct input, feedback and firmware tools require USB; native macOS diagnostics can also see other supported controllers and Bluetooth devices.
+Standard DualSense USB operation is hardware-tested. DualSense Edge is detected but not hardware-tested. Direct input, feedback and firmware tools require USB, so a controller paired over Bluetooth is reported with a reminder to connect a USB data cable; native macOS diagnostics can also see other supported controllers and Bluetooth devices.

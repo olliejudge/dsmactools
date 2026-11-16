@@ -1,6 +1,7 @@
 use clap::{ArgGroup, Parser};
 
 pub const DEFAULT_VID: u16 = 0x054c;
+/// Used when `--pid` is not given and the connected controller cannot be identified.
 pub const DEFAULT_PID: u16 = 0x0ce6;
 
 #[derive(Parser, Debug, Clone)]
@@ -12,8 +13,12 @@ pub const DEFAULT_PID: u16 = 0x0ce6;
 pub struct Args {
     #[arg(long, value_parser = parse_u16, default_value_t = DEFAULT_VID)]
     pub vid: u16,
-    #[arg(long, value_parser = parse_u16, default_value_t = DEFAULT_PID)]
-    pub pid: u16,
+    #[arg(
+        long,
+        value_parser = parse_u16,
+        help = "USB product ID: 0x0ce6 DualSense, 0x0df2 DualSense Edge (default: the connected controller)."
+    )]
+    pub pid: Option<u16>,
     #[arg(
         value_name = "FW_IMAGE",
         help = "Flash a local image after compatibility checks."
@@ -232,6 +237,20 @@ mod tests {
         assert!(Args::try_parse_from(["tool", "--duration", "5"]).is_err());
         assert!(
             Args::try_parse_from(["tool", "--record", "test.jsonl", "--duration", "5"]).is_ok()
+        );
+    }
+    #[test]
+    fn pid_is_only_set_when_given() {
+        assert_eq!(Args::try_parse_from(["tool"]).unwrap().pid, None);
+        assert_eq!(
+            Args::try_parse_from(["tool", "--pid", "0x0df2"])
+                .unwrap()
+                .pid,
+            Some(0x0df2)
+        );
+        assert_eq!(
+            Args::try_parse_from(["tool", "--pid", "3302"]).unwrap().pid,
+            Some(0x0ce6)
         );
     }
     #[test]

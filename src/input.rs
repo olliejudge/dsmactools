@@ -15,7 +15,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -61,48 +61,148 @@ pub fn decode(raw: &[u8]) -> Result<Value> {
 /// exists, `idle` is true and a `conditional_default` action emulates the default behaviour
 /// (terminate), so Ctrl-C and SIGTERM work normally between monitor/record/feedback runs.
 /// While one exists, `idle` is false and the signal only sets `requested`.
+///
+/// SIGHUP (the terminal closing) is caught only by [`Cancellation::including_hangup`], which a
+/// firmware install uses. Its handler is registered on first such use, so a process that never
+/// installs firmware keeps the inherited SIGHUP disposition (including `nohup`'s ignore). Once
+/// registered, `hangup_idle` emulates default termination whenever no install is running,
+/// including during monitor/record/feedback.
 struct SignalState {
     requested: Arc<AtomicBool>,
+    /// The number of the signal that set `requested`, or 0.
+    signal: Arc<AtomicUsize>,
     idle: Arc<AtomicBool>,
+    hangup_idle: Option<Arc<AtomicBool>>,
 }
 static SIGNALS: Mutex<Option<SignalState>> = Mutex::new(None);
+
+/// Register `signal` to set `requested`, or to terminate as by default while `idle` is true.
+fn register_deferrable(
+    signal: std::ffi::c_int,
+    idle: &Arc<AtomicBool>,
+    requested: &Arc<AtomicBool>,
+    number: &Arc<AtomicUsize>,
+) -> Result<()> {
+    // Actions run in registration order: the conditional default must come first, and the signal
+    // number is stored before `requested` is set so a reader of `requested` can always see it.
+    signal_hook::flag::register_conditional_default(signal, idle.clone())?;
+    signal_hook::flag::register_usize(signal, number.clone(), signal as usize)?;
+    signal_hook::flag::register(signal, requested.clone())?;
+    Ok(())
+}
 
 /// Catch process cancellation so timed effects can reset and captures can flush.
 pub struct Cancellation {
     requested: Arc<AtomicBool>,
     idle: Arc<AtomicBool>,
+    signal: Arc<AtomicUsize>,
+    hangup_idle: Option<Arc<AtomicBool>>,
 }
 impl Cancellation {
+    /// Catch SIGINT and SIGTERM. SIGHUP keeps its default behaviour.
     pub fn new() -> Result<Self> {
-        let mut state = SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
-        if state.is_none() {
+        Self::start(false)
+    }
+
+    /// Catch SIGINT, SIGTERM and SIGHUP, so closing the terminal window cannot stop the process.
+    pub fn including_hangup() -> Result<Self> {
+        Self::start(true)
+    }
+
+    fn start(hangup: bool) -> Result<Self> {
+        let mut guard = SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
             let requested = Arc::new(AtomicBool::new(false));
+            let signal = Arc::new(AtomicUsize::new(0));
             let idle = Arc::new(AtomicBool::new(true));
-            let signals = [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
-            // Actions run in registration order: the conditional default must come first.
-            for signal in signals {
-                signal_hook::flag::register_conditional_default(signal, idle.clone())?;
+            for number in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+                register_deferrable(number, &idle, &requested, &signal)?;
             }
-            for signal in signals {
-                signal_hook::flag::register(signal, requested.clone())?;
-            }
-            *state = Some(SignalState { requested, idle });
+            *guard = Some(SignalState {
+                requested,
+                signal,
+                idle,
+                hangup_idle: None,
+            });
         }
-        let state = state.as_ref().unwrap();
+        let state = guard.as_mut().unwrap();
+        if hangup && state.hangup_idle.is_none() {
+            let hangup_idle = Arc::new(AtomicBool::new(true));
+            register_deferrable(
+                signal_hook::consts::SIGHUP,
+                &hangup_idle,
+                &state.requested,
+                &state.signal,
+            )?;
+            state.hangup_idle = Some(hangup_idle);
+        }
+        let hangup_idle = if hangup {
+            state.hangup_idle.clone()
+        } else {
+            None
+        };
+        state.signal.store(0, Ordering::SeqCst);
         state.requested.store(false, Ordering::SeqCst);
         state.idle.store(false, Ordering::SeqCst);
+        if let Some(flag) = &hangup_idle {
+            flag.store(false, Ordering::SeqCst);
+        }
         Ok(Self {
             requested: state.requested.clone(),
+            signal: state.signal.clone(),
             idle: state.idle.clone(),
+            hangup_idle,
         })
     }
     pub fn requested(&self) -> bool {
         self.requested.load(Ordering::Relaxed)
     }
+    /// The signal that requested the stop, if one has arrived.
+    pub fn stop_signal(&self) -> Option<StopSignal> {
+        if !self.requested() {
+            return None;
+        }
+        // `requested` is set after the number is stored; fall back to Ctrl-C if it is unreadable.
+        Some(
+            StopSignal::from_number(self.signal.load(Ordering::SeqCst))
+                .unwrap_or(StopSignal::Interrupt),
+        )
+    }
+}
+
+/// A stop request that was held back while firmware was being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSignal {
+    Interrupt,
+    Terminate,
+    Hangup,
+}
+
+impl StopSignal {
+    fn from_number(number: usize) -> Option<Self> {
+        match i32::try_from(number).ok()? {
+            signal_hook::consts::SIGINT => Some(Self::Interrupt),
+            signal_hook::consts::SIGTERM => Some(Self::Terminate),
+            signal_hook::consts::SIGHUP => Some(Self::Hangup),
+            _ => None,
+        }
+    }
+
+    /// The conventional shell exit status for a process stopped by this signal: 128 + signal.
+    pub fn exit_code(self) -> i32 {
+        128 + match self {
+            Self::Interrupt => signal_hook::consts::SIGINT,
+            Self::Terminate => signal_hook::consts::SIGTERM,
+            Self::Hangup => signal_hook::consts::SIGHUP,
+        }
+    }
 }
 impl Drop for Cancellation {
     fn drop(&mut self) {
         self.idle.store(true, Ordering::SeqCst);
+        if let Some(flag) = &self.hangup_idle {
+            flag.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -281,6 +381,17 @@ pub fn record(dev: &DualSenseHid, path: &Path, seconds: u64, pid: u16) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_signals_map_from_their_numbers_to_exit_statuses() {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+        let status = |n: i32| StopSignal::from_number(n as usize).map(StopSignal::exit_code);
+        assert_eq!(status(SIGINT), Some(130));
+        assert_eq!(status(SIGTERM), Some(143));
+        assert_eq!(status(SIGHUP), Some(129));
+        assert_eq!(status(0), None);
+        assert_eq!(status(SIGINT + 1000), None);
+    }
+
     use super::*;
     #[test]
     fn decodes_buttons_signed_motion_and_touch() {
@@ -336,5 +447,39 @@ mod tests {
             .status()
             .unwrap();
         assert_eq!(status.signal(), Some(signal_hook::consts::SIGTERM));
+    }
+
+    // Re-run this binary. Each child catches SIGHUP during an install-style Cancellation, drops
+    // it, then must die from SIGHUP: when idle, and during a later monitor/record/feedback-style
+    // Cancellation, which never defers hangups.
+    #[cfg(unix)]
+    #[test]
+    fn hangup_is_deferred_only_by_an_install_cancellation() {
+        use signal_hook::{consts::SIGHUP, low_level::raise};
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(mode) = std::env::var_os("DSMAC_HANGUP_CHILD") {
+            let install = Cancellation::including_hangup().unwrap();
+            raise(SIGHUP).unwrap();
+            assert!(install.requested());
+            drop(install);
+            let _plain = (mode == "plain").then(|| Cancellation::new().unwrap());
+            raise(SIGHUP).unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            std::process::exit(0);
+        }
+        for mode in ["idle", "plain"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "input::tests::hangup_is_deferred_only_by_an_install_cancellation",
+                    "--test-threads=1",
+                ])
+                .env("DSMAC_HANGUP_CHILD", mode)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(SIGHUP), "{mode}");
+        }
     }
 }
