@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - Clearly distinguish firmware downloads, USB writing and installed-version verification.
 - Explain that writing firmware can take several minutes, and show elapsed time and estimated transfer time remaining.

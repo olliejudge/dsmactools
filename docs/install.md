@@ -65,7 +65,7 @@ Use one route or the other, not both. If you already installed with Homebrew, ru
 3. Install DS Mac Tools and open it:
 
    ```sh
-   cargo install --locked --git https://github.com/olliejudge/dsmactools --tag v0.4.0
+   cargo install --locked --git https://github.com/olliejudge/dsmactools --tag v0.5.0
    dsmactools
    ```
 
