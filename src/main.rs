@@ -133,30 +133,32 @@ fn run(args: Args) -> Result<()> {
             firmware::download(&target, latest, &info, args.pid, args.cache_dir.as_deref())?;
         println!(
             "Download validated: {} bytes in {:.1}s.",
-            image.data.len(),
+            image.data().len(),
             download_started.elapsed().as_secs_f64()
         );
         println!("Downloaded: {}", downloaded.display());
         if args.download_latest {
             println!(
                 "Validated {} bytes | SHA-256: {}",
-                image.data.len(),
-                image.sha256
+                image.data().len(),
+                image.sha256()
             );
             println!("Firmware saved only; nothing has been written to the controller.");
             return Ok(());
         }
         image
     };
+    update::require_single_controller(&path)?;
     let battery = dev.preflight_battery()?;
     println!(
         "Update: 0x{:04X} -> 0x{:04X} | Battery: approximately {battery}%",
-        info.firmware_version, image.version
+        info.firmware_version,
+        image.version()
     );
     println!(
         "Validated {} bytes | SHA-256: {}",
-        image.data.len(),
-        image.sha256
+        image.data().len(),
+        image.sha256()
     );
     println!(
         "Keep the USB cable connected and the Mac awake. Writing firmware can commit before finalization."
@@ -166,57 +168,9 @@ fn run(args: Args) -> Result<()> {
         println!("Update cancelled before writing.");
         return Ok(());
     }
-    let updater = update::DualSenseUpdater::new(dev);
-    let outcome = updater.flash(&image.data);
-    drop(updater);
-    // The old macOS HID path may change when the controller re-enumerates.
-    println!(
-        "Checking installed firmware; waiting up to 30 seconds for the controller to reconnect..."
-    );
-    let verified = verify_installed(args.vid, args.pid, &info, image.version);
-    match (outcome, verified) {
-        (Ok(()), Ok(current)) => println!(
-            "Verified installed firmware: 0x{:04X} ({} {}).",
-            current.firmware_version, current.build_date, current.build_time
-        ),
-        (Err(phase_error), Ok(current)) => println!(
-            "Verified installed firmware: 0x{:04X}. Controller rebooted/committed despite a protocol error: {phase_error}",
-            current.firmware_version
-        ),
-        (Err(phase_error), Err(_)) => {
-            return Err(AppError::Validation(format!(
-                "{phase_error}. Update not verified; reconnect and run --print-firmware-info before any retry"
-            )));
-        }
-        (Ok(()), Err(e)) => return Err(e),
-    }
+    let outcome = update::install(dev, &path, &image)?;
+    println!("{}", outcome.message());
     Ok(())
-}
-
-fn verify_installed(
-    vid: u16,
-    pid: u16,
-    before: &FirmwareInfo,
-    expected: u16,
-) -> Result<FirmwareInfo> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if let Ok(path) = find_first_device_path(vid, pid)
-            && let Ok(dev) = DualSenseHid::open(vid, pid, &path)
-            && let Ok(info) = dev.get_firmware_info()
-            && info.software_series == before.software_series
-            && info.hardware_info == before.hardware_info
-            && info.firmware_version == expected
-        {
-            return Ok(info);
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(AppError::Validation(format!(
-                "Transfer finished but installed firmware 0x{expected:04X} could not be verified. Reconnect and run --print-firmware-info; do not assume the update succeeded"
-            )));
-        }
-    }
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {

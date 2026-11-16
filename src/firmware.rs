@@ -138,13 +138,56 @@ pub fn check_catalogue() -> Result<()> {
     Ok(())
 }
 
+/// The controller state a firmware image was validated against. An install refuses to start
+/// unless the controller still reports exactly this state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllerIdentity {
+    pub pid: u16,
+    pub software_series: u16,
+    pub hardware_info: u32,
+    pub firmware_version: u16,
+}
+
+impl ControllerIdentity {
+    pub fn of(info: &FirmwareInfo, pid: u16) -> Self {
+        Self {
+            pid,
+            software_series: info.software_series,
+            hardware_info: info.hardware_info,
+            firmware_version: info.firmware_version,
+        }
+    }
+}
+
+/// A firmware image that passed every compatibility check for one controller state.
+///
+/// The fields are private, so an image can only come from [`FirmwareImage::validate`] (also
+/// used by [`FirmwareImage::load`] and [`download`]).
 pub struct FirmwareImage {
-    pub data: Vec<u8>,
-    pub version: u16,
-    pub sha256: String,
+    data: Vec<u8>,
+    version: u16,
+    sha256: String,
+    validated_for: ControllerIdentity,
 }
 
 impl FirmwareImage {
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// The controller state the image was checked against.
+    pub fn validated_for(&self) -> ControllerIdentity {
+        self.validated_for
+    }
+
     pub fn validate(
         data: Vec<u8>,
         info: &FirmwareInfo,
@@ -189,6 +232,7 @@ impl FirmwareImage {
             data,
             version,
             sha256,
+            validated_for: ControllerIdentity::of(info, pid),
         })
     }
 
@@ -213,10 +257,10 @@ pub fn download(
     let path = dir.join(format!("FWUPDATE{target}.bin"));
     // A partial file cannot become the cached firmware image.
     let temporary = dir.join(format!(".download-{}", std::process::id()));
-    std::fs::write(&temporary, &image.data)?;
+    std::fs::write(&temporary, image.data())?;
     std::fs::rename(&temporary, &path)?;
     let manifest = serde_json::json!({"source":url,"target":target,"version":format!("0x{version:04X}"),
-        "bytes":image.data.len(),"sha256":image.sha256});
+        "bytes":image.data().len(),"sha256":image.sha256()});
     std::fs::write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|e| invalid(e.to_string()))?,
@@ -240,6 +284,23 @@ pub fn cache_directory(override_path: Option<&Path>) -> Result<PathBuf> {
     Ok(cache)
 }
 
+/// Image bytes that pass validation for `pid`/`series`, with a known header layout.
+#[cfg(test)]
+pub(crate) fn sample_image(pid: u16, series: u16, version: u16) -> Vec<u8> {
+    let mut d = vec![0; FIRMWARE_SIZE];
+    let text = b"Copyright (C) 2022 Sony Interactive Entertainment Inc.";
+    d[..text.len()].copy_from_slice(text);
+    d[0x60] = 2;
+    d[0x62..0x64].copy_from_slice(&pid.to_le_bytes());
+    d[0x74..0x76].copy_from_slice(&series.to_le_bytes());
+    d[0x78..0x7a].copy_from_slice(&version.to_le_bytes());
+    // Distinct bytes after the header so ordering mistakes in a transfer are detectable.
+    for (i, byte) in d.iter_mut().enumerate().skip(0x100) {
+        *byte = (i % 251) as u8;
+    }
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,14 +313,7 @@ mod tests {
         FirmwareInfo::parse(r).unwrap()
     }
     fn image() -> Vec<u8> {
-        let mut d = vec![0; FIRMWARE_SIZE];
-        let text = b"Copyright (C) 2022 Sony Interactive Entertainment Inc.";
-        d[..text.len()].copy_from_slice(text);
-        d[0x60] = 2;
-        d[0x62..0x64].copy_from_slice(&0x0ce6u16.to_le_bytes());
-        d[0x74] = 0xb;
-        d[0x78..0x7a].copy_from_slice(&0x0630u16.to_le_bytes());
-        d
+        sample_image(0x0ce6, 0x000b, 0x0630)
     }
     #[test]
     fn selects_actual_series_and_rejects_unknown_or_wrong_pid() {
@@ -307,6 +361,24 @@ mod tests {
         let mut i = info();
         i.firmware_version = 0x630;
         assert!(FirmwareImage::validate(image(), &i, 0x0ce6, None).is_err());
+    }
+    #[test]
+    fn validated_image_records_the_controller_it_was_checked_for() {
+        let mut i = info();
+        i.hardware_info = 0x1107;
+        let image = FirmwareImage::validate(image(), &i, 0x0ce6, Some(0x630)).unwrap();
+        assert_eq!(
+            image.validated_for(),
+            ControllerIdentity {
+                pid: 0x0ce6,
+                software_series: 0x000b,
+                hardware_info: 0x1107,
+                firmware_version: 0x0580,
+            }
+        );
+        assert_eq!(image.version(), 0x0630);
+        assert_eq!(image.data().len(), FIRMWARE_SIZE);
+        assert_eq!(image.sha256().len(), 64);
     }
     #[test]
     fn firmware_type_can_change_across_an_upgrade() {
